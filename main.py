@@ -77,6 +77,7 @@ from memory.config_manager     import (
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
+from core.i18n                import t as _t
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
@@ -747,7 +748,7 @@ class JarvisLive:
         self._last_user_speech = time.monotonic()   # start the auto-sleep clock now
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
-        self.ui.write_log(f"SYS: Awake — {reason}.")
+        self.ui.write_log("SYS: " + _t("Awake") + " — " + reason + ".")
 
     def sleep(self, reason: str = "timeout") -> None:
         if not self._awake:
@@ -755,7 +756,7 @@ class JarvisLive:
         self._awake = False
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
-        self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
+        self.ui.write_log("SYS: " + _t("Sleeping") + " — " + reason + ". " + _t("Say 'Hey Jarvis' to wake me."))
 
     async def _run_sleep_watch(self) -> None:
         """Auto-sleep after the configured silence window (wake-word mode only)."""
@@ -864,7 +865,7 @@ class JarvisLive:
             self._clear_stall()
             print(f"[JARVIS] ⚠️  No response for {_STALL_LIMIT:.0f}s — "
                   f"the live session is not answering. Rebuilding it.")
-            self.ui.write_log("SYS: The model stopped answering — reconnecting.")
+            self.ui.write_log("SYS: " + _t("The model stopped answering — reconnecting."))
             self.request_reconnect(keep_context=True, reason="no response")
             return          # this session is going away; the new one gets its own watcher
 
@@ -922,7 +923,7 @@ class JarvisLive:
         if ex is None or dead or getattr(loop, "_executor_shutdown_called", False):
             if dead:
                 print("[JARVIS] ⚠️  Thread pool was shut down — replacing it")
-                self.ui.write_log("SYS: Recovered from a stopped worker pool.")
+                self.ui.write_log(_t("SYS: Recovered from a stopped worker pool."))
             # Without this flag reset, asyncio refuses the new pool as well.
             if getattr(loop, "_executor_shutdown_called", False):
                 loop._executor_shutdown_called = False
@@ -938,8 +939,8 @@ class JarvisLive:
         keep   = self._reconnect_keep
         reason = getattr(self, "_reconnect_reason", "") or "settings"
         self.ui.write_log(
-            f"SYS: Applying {reason} — reconnecting"
-            + ("..." if keep else " (starting a fresh conversation)...")
+            _t("SYS: Applying ") + reason + _t(" — reconnecting")
+            + (_t("...") if keep else _t(" (starting a fresh conversation)..."))
         )
         raise _ReconnectSignal(keep_context=keep)
 
@@ -947,7 +948,7 @@ class JarvisLive:
         """Called from Qt main thread when user presses Remote Control."""
         if self._dashboard is None:
             self.ui.write_log(
-                "SYS: Dashboard unavailable. "
+                "SYS: " + _t("Dashboard unavailable. ") +
                 "Run: pip install fastapi \"uvicorn[standard]\" cryptography"
             )
             return None
@@ -977,7 +978,7 @@ class JarvisLive:
                 loop = self._loop
                 queued = False
         if queued:
-            self.ui.write_log("SYS: JARVIS is connecting; command queued.")
+            self.ui.write_log("SYS: " + _t("JARVIS is connecting; command queued."))
             return
         # If wake-word mode is on but the assistant is asleep, a typed command is
         # a natural wake trigger: it is explicit, immediate and far less
@@ -1048,9 +1049,9 @@ class JarvisLive:
         # focused. Reporting it must never be able to undo the thing it reports.
         try:
             self.ui.write_log(
-                f"SYS: Push-to-talk on — hold {self._ptt.label}"
+                _t("Push-to-talk on — hold ") + self._ptt.label
                 + ("." if scope == "global"
-                   else " (works while this window is focused)."))
+                   else " " + _t("works while this window is focused.")))
         except Exception:
             pass
         return scope
@@ -1122,7 +1123,7 @@ class JarvisLive:
                 self._engine.interrupt()
             except Exception:
                 pass
-        self.ui.write_log("SYS: Interrupted — listening...")
+        self.ui.write_log("SYS: " + _t("Interrupted — listening..."))
 
     def speak(self, text: str):
         if not self._loop or not self.session:
@@ -1439,7 +1440,7 @@ class JarvisLive:
                     result = "Specify action (add/remove/list) and a topic."
 
             elif name == "shutdown_jarvis":
-                self.ui.write_log("SYS: Shutdown requested.")
+                self.ui.write_log("SYS: " + _t("Shutdown requested."))
                 async def _do_shutdown():
                     await self._save_session_summary()
                     if self.session:
@@ -1652,7 +1653,8 @@ class JarvisLive:
                     raise
                 print(f"[JARVIS] ⚠️  Mic '{_mic_name}' failed: {_e} — using default")
                 self.ui.write_log(
-                    f"SYS: Microphone '{_mic_name}' unavailable — using system default."
+                    _t("SYS: Microphone '{name}' unavailable — using system default.")
+                    .format(name=_mic_name)
                 )
                 _mic_stream = _open_mic(None)
 
@@ -1869,7 +1871,10 @@ class JarvisLive:
             if _spk_dev is None:
                 raise
             print(f"[JARVIS] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
-            self.ui.write_log(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
+            self.ui.write_log(
+                _t("SYS: Speaker '{name}' unavailable — using system default.")
+                .format(name=_spk_name)
+            )
             stream = _open_spk(None)
 
         # Ask the device how far behind the speakers actually are, rather than
@@ -2108,7 +2113,7 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
                 print(f"[JARVIS] Briefing phase 2 failed: {e}")
-                self.ui.write_log("SYS: Could not fetch the news for the briefing.")
+                self.ui.write_log(_t("SYS: Could not fetch the news for the briefing."))
 
         asyncio.create_task(_deliver_news())
 
@@ -2260,7 +2265,7 @@ class JarvisLive:
                     pass
 
     def _on_phone_connected(self) -> None:
-        self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
+        self.ui.write_log(_t("SYS: Phone connected via Remote Dashboard."))
         self.ui.notify_phone_connected()
 
     # ── dashboard command relay ─────────────────────────────────────────────
@@ -2519,7 +2524,7 @@ class JarvisLive:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
                         # is the whole point, and it is invisible otherwise.
-                        self.ui.write_log("SYS: Reconnected — conversation restored.")
+                        self.ui.write_log(_t("SYS: Reconnected — conversation restored."))
 
                     # Wake word: if enabled, come up ASLEEP (mic gated, silent)
                     # until the user says "Hey Jarvis" or taps wake in the UI.
@@ -2527,11 +2532,11 @@ class JarvisLive:
                         self._ensure_wake_detector()
                         self._awake = False
                         self.ui.set_state("SLEEPING")
-                        self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
+                        self.ui.write_log(_t("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me."))
                     else:
                         self._awake = True
                         self.ui.set_state("LISTENING")
-                        self.ui.write_log("SYS: JARVIS online.")
+                        self.ui.write_log(_t("SYS: JARVIS online."))
 
                     # What this machine will not permit, said once, on screen.
                     #
@@ -2618,7 +2623,7 @@ class JarvisLive:
                     or "NOT_FOUND" in str(e)
                 ):
                     print("[JARVIS] 🔗 Resumption handle rejected — starting a fresh session")
-                    self.ui.write_log("SYS: Could not restore the conversation — starting fresh.")
+                    self.ui.write_log(_t("SYS: Could not restore the conversation — starting fresh."))
                     self._resume_handle = None
                     self._conn_backoff = 0
                     continue

@@ -893,8 +893,8 @@ class DashboardServer:
                 # guessing is not working.
                 return JSONResponse(
                     {"ok": False,
-                     "error": f"Too many attempts. Try again in "
-                              f"{int(wait) + 1} seconds."},
+                     "error": f"Muitas tentativas. Tente novamente em "
+                              f"{int(wait) + 1} segundos."},
                     status_code=429,
                 )
             body    = await req.json()
@@ -910,12 +910,12 @@ class DashboardServer:
                 if self._connect_callback:
                     self._connect_callback()
                 asyncio.create_task(self.broadcast(
-                    {"type": "sys", "text": "Remote connection established."}
+                    {"type": "sys", "text": "Conexão remota estabelecida."}
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
                 return JSONResponse({"ok": True, "token": tok})
             self._throttle.record_failure(who)
-            return JSONResponse({"ok": False, "error": "Invalid or expired key"},
+            return JSONResponse({"ok": False, "error": "Chave inválida ou expirada"},
                                 status_code=401)
 
         @app.get("/auto-login")
@@ -930,8 +930,8 @@ class DashboardServer:
        display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}
   h2{color:#f87171;margin-bottom:12px}p{color:#5e6a7e;font-size:14px}
 </style></head>
-<body><div><h2>Link Expired</h2>
-<p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
+<body><div><h2>Link Expirado</h2>
+<p>Pressione <strong style="color:#dde3ed">Controle Remoto</strong> no JARVIS para obter um novo código QR.</p>
 </div></body></html>""")
 
             del self._pending_keys[key]
@@ -945,7 +945,7 @@ class DashboardServer:
             if self._connect_callback:
                 self._connect_callback()
             asyncio.create_task(self.broadcast(
-                {"type": "sys", "text": "Remote connection established via QR code."}
+                {"type": "sys", "text": "Conexão remota estabelecida pelo QR Code."}
             ))
 
             return HTMLResponse(f"""<!DOCTYPE html>
@@ -962,7 +962,7 @@ class DashboardServer:
   localStorage.setItem('jarvis_device_token','{dev_tok}');
   setTimeout(function(){{location.replace('/')}},400);
 </script>
-<p>Connecting to JARVIS…</p>
+<p>Conectando ao JARVIS…</p>
 </body></html>""")
 
         @app.post("/api/device-login")
@@ -983,7 +983,7 @@ class DashboardServer:
             if self._connect_callback:
                 self._connect_callback()
             asyncio.create_task(self.broadcast(
-                {"type": "sys", "text": "Known device reconnected automatically."}
+                {"type": "sys", "text": "Dispositivo conhecido reconectado automaticamente."}
             ))
             return JSONResponse({"ok": True, "token": tok, "key": session_key})
 
@@ -991,7 +991,7 @@ class DashboardServer:
         async def revoke_devices(req: Request):
             """Invalidate all persistent device tokens (admin action)."""
             if not _auth(req):
-                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                return JSONResponse({"error": "Não autorizado"}, status_code=401)
             # ALSO drop the live tokens, which this did not do.
             #
             # It cleared the remembered devices and left every session those
@@ -1015,14 +1015,14 @@ class DashboardServer:
         @app.post("/api/command")
         async def command(req: Request):
             if not _auth(req):
-                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                return JSONResponse({"error": "Não autorizado"}, status_code=401)
             body  = await req.json()
             token = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             enc   = body.get("enc", "")
             if enc:
                 text = self._decrypt(token, enc)
                 if text is None:
-                    return JSONResponse({"error": "Decryption failed"}, status_code=400)
+                    return JSONResponse({"error": "Falha ao descriptografar a mensagem"}, status_code=400)
             else:
                 text = (body.get("text") or "").strip()
             if text:
@@ -1034,7 +1034,7 @@ class DashboardServer:
         @app.post("/api/wake")
         async def wake_ep(req: Request):
             if not _auth(req):
-                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                return JSONResponse({"error": "Não autorizado"}, status_code=401)
             if self._wake_callback:
                 self._wake_callback()
             return JSONResponse({"ok": True})
@@ -1049,7 +1049,7 @@ class DashboardServer:
                 return
             await websocket.accept()
             asyncio.create_task(self.broadcast(
-                {"type": "sys", "text": "Phone microphone live."}
+                {"type": "sys", "text": "Microfone do celular ativo."}
             ))
             try:
                 while True:
@@ -1064,7 +1064,7 @@ class DashboardServer:
                 pass
             finally:
                 asyncio.create_task(self.broadcast(
-                    {"type": "sys", "text": "Phone microphone stopped."}
+                    {"type": "sys", "text": "Microfone do celular desativado."}
                 ))
 
         # ── File sharing ──────────────────────────────────────────────────────
@@ -1078,7 +1078,7 @@ class DashboardServer:
             @app.post("/api/upload")
             async def upload_file(req: Request, file: UploadFile = FastAPIFile(...)):
                 if not _auth(req):
-                    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                    return JSONResponse({"error": "Não autorizado"}, status_code=401)
 
                 safe = _safe_filename(file.filename or "upload")
                 dest = self._uploads_dir / safe
@@ -1101,7 +1101,7 @@ class DashboardServer:
                                 fout.close()
                                 dest.unlink(missing_ok=True)
                                 return JSONResponse(
-                                    {"error": f"File too large (max {MAX_UPLOAD_MB} MB)"},
+                                    {"error": f"Arquivo muito grande (máximo de {MAX_UPLOAD_MB} MB)"},
                                     status_code=413,
                                 )
                             fout.write(chunk)
@@ -1123,14 +1123,14 @@ class DashboardServer:
             @app.post("/api/upload")
             async def upload_unavailable(req: Request):
                 return JSONResponse(
-                    {"error": "File uploads require: pip install python-multipart"},
+                    {"error": "O envio de arquivos requer: pip install python-multipart"},
                     status_code=503,
                 )
 
         @app.get("/api/files")
         async def list_files(req: Request):
             if not _auth(req):
-                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                return JSONResponse({"error": "Não autorizado"}, status_code=401)
             files = []
             try:
                 for f in sorted(
@@ -1148,11 +1148,11 @@ class DashboardServer:
             # Auth via query param — browser <a download> can't send custom headers
             tok = token.strip()
             if not _valid(tok):
-                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                return JSONResponse({"error": "Não autorizado"}, status_code=401)
             safe = re.sub(r'[/\\]', '', filename)
             path = self._uploads_dir / safe
             if not path.exists() or not path.is_file():
-                return JSONResponse({"error": "Not found"}, status_code=404)
+                return JSONResponse({"error": "Arquivo não encontrado"}, status_code=404)
             return FileResponse(str(path), filename=safe)
 
         @app.websocket("/ws")
