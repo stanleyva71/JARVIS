@@ -972,6 +972,67 @@ async def test_ai_router_fallback():
           calls[-1:] == [primary] and events == [{"text": "Primary answer"}])
 
     calls.clear()
+    preferred_router = AIRouter(
+        primary,
+        (ollama,),
+        config_getter=config_getter,
+        preference_getter=lambda profile:
+            ollama if profile == "coding" else "",
+        builder=lambda pid, cfg: FakeLLM(
+            pid, [{"text": "preferred answer"}]),
+    )
+    coding_events = await collect(
+        preferred_router,
+        messages=[{"role": "user",
+                   "content": "refactor this Python function"}],
+    )
+    check("coding preference is chosen before primary",
+          calls == [ollama]
+          and coding_events == [{"text": "preferred answer"}]
+          and preferred_router.last_profile == "coding"
+          and preferred_router.last_selected_provider == ollama)
+
+    calls.clear()
+    cooldown_pref_router = AIRouter(
+        primary,
+        (ollama,),
+        config_getter=lambda pid: {
+            **config_getter(pid),
+            "cooldown_until_wall": (
+                9999999999 if pid == ollama else 0
+            ),
+        },
+        preference_getter=lambda profile: ollama,
+        builder=lambda pid, cfg: FakeLLM(
+            pid, [{"text": "primary fallback answer"}]),
+    )
+    fallback_events = await collect(
+        cooldown_pref_router,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    check("cooldown preference falls back to primary",
+          calls == [primary]
+          and fallback_events == [{"text": "primary fallback answer"}])
+
+    calls.clear()
+    disabled_router = AIRouter(
+        ollama,
+        (),
+        config_getter=lambda pid: {
+            **config_getter(pid),
+            "enabled": "false",
+        },
+        builder=lambda pid, cfg: FakeLLM(pid),
+    )
+    try:
+        await collect(disabled_router)
+        disabled_failed = False
+    except RuntimeError:
+        disabled_failed = True
+    check("disabled provider is never called",
+          disabled_failed and calls == [])
+
+    calls.clear()
     persisted: dict[str, dict] = {}
     persistent_getter = lambda pid: {
         **config_getter(pid),
@@ -1636,7 +1697,8 @@ def test_panel_settings_survive():
                                        get_provider_mode, save_pipeline,
                                        save_provider_config,
                                        save_provider_mode,
-                                       save_sidecar_provider)
+                                       save_sidecar_provider,
+                                       get_task_router_preferences)
 
     # The test writes the real config and puts it back. A fresh install has
     # none yet: then the file it made is removed again afterwards.
@@ -1724,7 +1786,26 @@ def test_panel_settings_survive():
         ov._rebuild_body()
         ov._pipe.update({"stt": "whisper@local", "llm": OLLAMA,
                          "tts": "elevenlabs@elevenlabs"})
+        save_provider_config(OLLAMA, {
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "qwen3:8b",
+        })
         ov._rebuild_body()
+        coding_route = getattr(ov, "_route_profile_combos", {}).get("coding")
+        coding_route_detail = None
+        if coding_route is not None:
+            coding_index = coding_route.findData(OLLAMA)
+            coding_route_detail = (
+                coding_route.count(),
+                coding_index,
+                [(coding_route.itemText(i), coding_route.itemData(i))
+                 for i in range(coding_route.count())],
+            )
+            if coding_index >= 0:
+                coding_route.setCurrentIndex(coding_index)
+        check("coding route was selected",
+              ov._route_preferences.get("coding") == OLLAMA,
+              str(ov._route_preferences))
 
         import pathlib
         writes = [0]
@@ -1756,6 +1837,16 @@ def test_panel_settings_survive():
         check("no slot reads 'not set'",
               all(ov2._pipe.get(s) for s in ("stt", "llm", "tts")),
               str(ov2._pipe))
+        reopened_coding_route = getattr(
+            ov2, "_route_profile_combos", {}
+        ).get("coding")
+        reopened_selected = (reopened_coding_route.currentData()
+                             if reopened_coding_route is not None else None)
+        check("task route preference survives reopening",
+              reopened_coding_route is not None
+              and reopened_selected == OLLAMA,
+              f"config={get_task_router_preferences()} "
+              f"selected={reopened_selected}")
 
         # -- the wheel does not change a box you scroll past -----------------
         combos = ov2.findChildren(QComboBox)
@@ -1766,6 +1857,61 @@ def test_panel_settings_survive():
         _patch_config(providers=restore or {})
         if not had_config:
             cfg_file.unlink(missing_ok=True)
+
+def test_task_router_profiles_and_persistence():
+    from core.ai_router import classify_task_profile
+    from memory.config_manager import (
+        get_task_router_preferences,
+        save_task_router_preferences,
+    )
+
+    section("[23] Intelligent task routing")
+
+    check("conversation profile is the default",
+          classify_task_profile([{"role": "user", "content": "hello, how are you?"}]
+                                ) == "conversation")
+    check("coding profile is conservative",
+          classify_task_profile([{"role": "user",
+                                  "content": "debug this Python traceback and refactor the function"}]
+                                ) == "coding")
+    check("reasoning profile is detected",
+          classify_task_profile([{"role": "user",
+                                  "content": "analyze the tradeoffs and plan a strategy"}]
+                                ) == "reasoning")
+    check("vision profile wins for images",
+          classify_task_profile([{"role": "user", "content": [
+              {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+              {"type": "text", "text": "describe this"},
+          ]}]) == "vision")
+    check("source search is not reclassified as generic reasoning",
+          classify_task_profile(
+              [{"role": "user", "content": "search the web for current sources"}],
+              [{"name": "web_search"}],
+          ) == "conversation")
+
+    before = get_task_router_preferences()
+    try:
+        save_task_router_preferences({
+            "conversation": "openai_compat@ollama",
+            "coding": "openai_compat@groq",
+            "reasoning": "",
+            "vision": "openai_compat@ollama",
+        })
+        restored = get_task_router_preferences()
+        check("task route preferences persist",
+              restored == {
+                  "conversation": "openai_compat@ollama",
+                  "coding": "openai_compat@groq",
+                  "vision": "openai_compat@ollama",
+              })
+        save_task_router_preferences({})
+        check("automatic routing is restored",
+              get_task_router_preferences() == {})
+    finally:
+        save_task_router_preferences(before)
+
+    check("old configuration remains compatible",
+          isinstance(get_task_router_preferences(), dict))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1791,6 +1937,7 @@ async def main() -> int:
     test_a_chosen_voice_downloads_itself()
     test_panel_settings_survive()
     test_ai_policy_and_errors()
+    test_task_router_profiles_and_persistence()
     await test_partial_streaming_is_not_recoverable()
     await test_ai_router_fallback()
 

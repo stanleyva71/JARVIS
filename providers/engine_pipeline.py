@@ -1173,7 +1173,8 @@ def _parse_prompt_call(text: str, known: set[str]) -> Optional[FunctionCall]:
 def _make(cfg: dict) -> PipelineEngine:
     """Built from the ids stored in the panel, resolved through the registry."""
     from memory.config_manager import (get_ai_router_alternatives,
-                                       get_provider_config)
+                                       get_provider_config,
+                                       get_task_router_preferences)
     from core.ai_router import AIRouter
     from . import registry
 
@@ -1186,6 +1187,12 @@ def _make(cfg: dict) -> PipelineEngine:
         llm_id,
         get_ai_router_alternatives(),
         config_getter=get_provider_config,
+        preference_getter=lambda profile:
+            get_task_router_preferences().get(profile, ""),
+        selection_logger=lambda profile, provider_id:
+            (cfg.get("log") or (lambda _text: None))(
+                f"SYS: Task route {profile} -> {provider_id}"
+            )
     ) if llm_id else None
     if llm is None:
         raise RuntimeError("the pipeline engine needs a language model")

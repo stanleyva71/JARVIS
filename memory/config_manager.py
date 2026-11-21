@@ -501,6 +501,35 @@ def save_ai_router_alternatives(provider_ids: list[str] | tuple[str, ...]) -> No
     _patch_providers(ai_router_alternatives=out)
 
 
+TASK_ROUTER_PROFILES = ("conversation", "reasoning", "coding", "vision")
+
+
+def get_task_router_preferences() -> dict[str, str]:
+    """Get explicit provider preferences for task profiles.
+
+    Missing or old configurations return an empty dict, which preserves the
+    existing primary-plus-alternatives routing exactly.
+    """
+    val = get_providers().get("task_router")
+    if not isinstance(val, dict):
+        return {}
+    return {
+        profile: str(val.get(profile) or "").strip()
+        for profile in TASK_ROUTER_PROFILES
+        if str(val.get(profile) or "").strip()
+    }
+
+
+def save_task_router_preferences(preferences: dict | None) -> None:
+    """Persist de-duplicated task-profile provider preferences."""
+    out: dict[str, str] = {}
+    for profile in TASK_ROUTER_PROFILES:
+        provider_id = str((preferences or {}).get(profile) or "").strip()
+        if provider_id:
+            out[profile] = provider_id
+    _patch_providers(task_router=out)
+
+
 def get_sidecar_provider() -> str:
     """The provider id used for one-shot calls when Gemini cannot answer them,
     or '' for none.
@@ -593,7 +622,8 @@ def save_sidecar_first(enabled: bool) -> None:
 def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
                    sidecar: str = None, sidecar_first: bool = None,
                    coding: str = None,
-                   ai_router_alternatives: list[str] | tuple[str, ...] = None) -> None:
+                   ai_router_alternatives: list[str] | tuple[str, ...] = None,
+                   task_router: dict | None = None) -> None:
     """Write the whole providers block in ONE file write.
 
     The settings panel used to call five setters in a row — one per provider's
@@ -650,6 +680,13 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
             if pid and pid not in out:
                 out.append(pid)
         block["ai_router_alternatives"] = out
+    if task_router is not None:
+        routes: dict[str, str] = {}
+        for profile in TASK_ROUTER_PROFILES:
+            provider_id = str((task_router or {}).get(profile) or "").strip()
+            if provider_id:
+                routes[profile] = provider_id
+        block["task_router"] = routes
 
     data["providers"] = block
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

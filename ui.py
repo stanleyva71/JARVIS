@@ -2767,7 +2767,8 @@ class ProvidersOverlay(_HudOverlay):
                                            get_provider_config,
                                            get_provider_mode, get_sidecar_first,
                                            get_sidecar_provider,
-                                           get_ai_router_alternatives)
+                                           get_ai_router_alternatives,
+                                           get_task_router_preferences)
         from providers import registry
 
         self._registry = registry
@@ -2888,6 +2889,7 @@ class ProvidersOverlay(_HudOverlay):
         self._coding = self._normalise(get_coding_provider(), "llm")
         self._sidecar_first = get_sidecar_first()
         self._alternatives = list(get_ai_router_alternatives())
+        self._route_preferences = dict(get_task_router_preferences())
         self._rebuild_body()
 
         outer.addWidget(self._footer)
@@ -3262,6 +3264,7 @@ class ProvidersOverlay(_HudOverlay):
             for slot, num, name, what in self._SLOTS:
                 self._body_lay.addWidget(self._slot_box(slot, num, name, what))
             self._body_lay.addWidget(self._alternatives_box_widget())
+            self._body_lay.addWidget(self._routes_box_widget())
         else:
             w, lay = self._box([])
             lay.addWidget(self._label(
@@ -3677,6 +3680,65 @@ class ProvidersOverlay(_HudOverlay):
             self._fetch_models(sid)
         QTimer.singleShot(0, self._rebuild_body)
 
+    def _routes_box_widget(self) -> QWidget:
+        """Compact automatic/provider preference controls per task profile."""
+        head = self._label("ROUTES BY TASK", 9, C.PRI, bold=True)
+        w, lay = self._box([head])
+        lay.addWidget(self._label(
+            "Optional preferences. Automatic keeps the current provider and "
+            "fallback order; unavailable, disabled or insecure providers are skipped.",
+            7, C.TEXT_DIM))
+
+        configured: list[tuple[str, str]] = []
+        from core.ai_policy import PolicyViolation, validate_provider
+        for pid, eid, entry, decl in self._catalog("llm"):
+            sid = self._sid(pid, eid)
+            cfg = dict(self._get_cfg(sid))
+            if str(cfg.get("enabled") or "1").strip().lower() in {
+                    "0", "false", "off", "disabled"}:
+                continue
+            if not cfg:
+                continue
+            if self._registry.missing_fields(sid, cfg):
+                continue
+            try:
+                validate_provider(sid, cfg, declaration=decl)
+            except PolicyViolation:
+                continue
+            label = entry.get("label") or decl.get("label") or sid
+            configured.append((sid, str(label)))
+
+        configured = list(dict.fromkeys(configured))
+        profile_labels = (
+            ("conversation", "Conversation"),
+            ("reasoning", "Reasoning"),
+            ("coding", "Coding"),
+            ("vision", "Vision"),
+        )
+        self._route_profile_combos = {}
+        for profile, label in profile_labels:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(self._label(label, 7, C.TEXT_DIM), 1)
+            combo = self._combo()
+            combo.addItem(t("Automatic"), "")
+            for sid, provider_label in configured:
+                combo.addItem(provider_label, sid)
+            selected = str(self._route_preferences.get(profile) or "")
+            index = combo.findData(selected) if selected else 0
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.currentIndexChanged.connect(
+                lambda _i, p=profile, b=combo:
+                    self._route_preferences.__setitem__(p, b.currentData() or "")
+            )
+            row.addWidget(combo, 2)
+            holder = QWidget()
+            holder.setLayout(row)
+            holder.setStyleSheet("background: transparent; border: none;")
+            lay.addWidget(holder)
+            self._route_profile_combos[profile] = combo
+        return w
+
     def _alternatives_box_widget(self) -> QWidget:
         """Ordered fallback list for the Pipeline thinking provider."""
         head = self._label("↕  THINKING FALLBACK ORDER", 9, C.PRI, bold=True)
@@ -3944,6 +4006,7 @@ class ProvidersOverlay(_HudOverlay):
             sidecar_first=self._first_combo.currentData() == "before",
             coding=self._coding,
             ai_router_alternatives=self._alternatives,
+            task_router=self._route_preferences,
         )
 
         # Providers are cached by configuration; a changed setting must not go

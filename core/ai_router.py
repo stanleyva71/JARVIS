@@ -8,6 +8,66 @@ from core.ai_errors import ErrorKind, classify_error
 from core.ai_policy import validate_provider
 
 
+TASK_PROFILES = ("conversation", "reasoning", "coding", "vision")
+
+
+def classify_task_profile(messages: list[dict] | None = None,
+                          tools: list[dict] | None = None) -> str:
+    """Deterministically classify a task without making any model call."""
+    has_image = AIRouter._requires_vision(messages or [])
+    if has_image:
+        return "vision"
+
+    tool_names: set[str] = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "").lower()
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+        name = name or str(function.get("name") or "").lower()
+        if name:
+            tool_names.add(name)
+
+    text_parts: list[str] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+    text = " ".join(text_parts).lower()
+
+    coding_markers = (
+        "python", "javascript", "typescript", "c#", "golang", " rust ",
+        "java ", "code", "source code", "bug", "debug", "traceback",
+        "stack trace", "exception", "compile", "compiler", "refactor",
+        "implement", "function", "class ", "programming", "git ",
+        "pull request", "syntax", "dependency", "unit test",
+        "write a script", "fix this", "patch",
+    )
+    for marker in coding_markers:
+        if marker in f" {text} ":
+            return "coding"
+
+    reasoning_markers = (
+        "reason", "prove", "derive", "plan ", "planning", "strategy",
+        "analyze", "analyse", "analysis", "compare", "evaluation",
+        "trade-off", "tradeoff", "architect", "step by step",
+        "complex problem", "decision", "hypothesis",
+    )
+    research_tools = {"web_search", "google_search", "grounding"}
+    if not (tool_names & research_tools):
+        for marker in reasoning_markers:
+            if marker in text:
+                return "reasoning"
+
+    return "conversation"
+
+
 class AIRouter:
     """Try one primary LLM, then a short explicit list of authorized alternatives."""
 
@@ -19,6 +79,8 @@ class AIRouter:
         config_getter: Callable[[str], dict] | None = None,
         builder: Callable[[str, dict], Any] | None = None,
         config_setter: Callable[[str, dict], None] | None = None,
+        preference_getter: Callable[[str], str] | None = None,
+        selection_logger: Callable[[str, str], None] | None = None,
     ) -> None:
         self.primary_id = str(primary_id or "").strip()
         self.alternatives = tuple(str(pid).strip() for pid in alternatives
@@ -26,9 +88,14 @@ class AIRouter:
         self._config_getter = config_getter
         self._builder = builder
         self._config_setter = config_setter
+        self._preference_getter = preference_getter
+        self._selection_logger = selection_logger
         self._cooldown: dict[str, float] = {}
         self._last: Any = None
         self._partial = False
+        self.last_profile = "conversation"
+        self.last_selected_provider = ""
+        self.selection_log: list[tuple[str, str]] = []
         self.caps = {}
         self.caps.update({
             "tools": False,
@@ -39,8 +106,28 @@ class AIRouter:
         })
 
     def _ids(self) -> list[str]:
+        return self._ordered_ids("conversation", [], [])
+
+    def _ordered_ids(self, profile: str,
+                     messages: list[dict] | None = None,
+                     tools: list[dict] | None = None) -> list[str]:
+        preferred = ""
+        if self._preference_getter is not None:
+            try:
+                preferred = str(self._preference_getter(profile) or "").strip()
+            except Exception:
+                preferred = ""
+        elif hasattr(self, "_preferences"):
+            preferred = str(self._preferences.get(profile) or "").strip()
+        if not preferred:
+            try:
+                from memory.config_manager import get_task_router_preferences
+                preferred = str(get_task_router_preferences().get(profile) or "").strip()
+            except Exception:
+                preferred = ""
+
         ids: list[str] = []
-        for provider_id in (self.primary_id,) + self.alternatives:
+        for provider_id in (preferred, self.primary_id) + self.alternatives:
             if provider_id and provider_id not in ids:
                 ids.append(provider_id)
         return ids
@@ -159,7 +246,7 @@ class AIRouter:
         return caps
 
     def ensure_vision_known(self, save=None) -> bool:
-        provider_id = self.primary_id
+        provider_id = self._ordered_ids("vision")[0]
         try:
             provider = self._build(provider_id)
             self._copy_primary_caps(provider)
@@ -188,25 +275,35 @@ class AIRouter:
         attempted: set[str] = set()
         requires_tools = bool(tools)
         requires_vision = self._requires_vision(messages)
+        profile = classify_task_profile(messages, tools)
+        self.last_profile = profile
 
-        for provider_id in self._ids():
+        for provider_id in self._ordered_ids(profile, messages, tools):
             if provider_id in attempted or self._cooling(provider_id):
                 continue
             attempted.add(provider_id)
+            cfg = self._config(provider_id)
+            if str(cfg.get("enabled") or "1").strip().lower() in {"0", "false", "off", "disabled"}:
+                continue
 
             try:
                 provider = self._build(provider_id)
-                if provider_id != self.primary_id and not self._compatible(
+                if not self._compatible(
                     provider,
                     requires_tools=requires_tools,
                     requires_vision=requires_vision,
                 ):
                     continue
                 self._copy_primary_caps(provider)
-                if provider_id == self.primary_id:
-                    # The primary may have cached vision/tool capabilities that
-                    # changed after ensure_vision_known().
-                    self.caps.update(self._provider_caps(provider))
+                self.last_selected_provider = provider_id
+                selection = (profile, provider_id)
+                if selection not in self.selection_log:
+                    self.selection_log.append(selection)
+                if self._selection_logger is not None:
+                    try:
+                        self._selection_logger(profile, provider_id)
+                    except Exception:
+                        pass
                 async for event in provider.chat(
                     messages,
                     tools,
@@ -250,21 +347,33 @@ class AIRouter:
         attempted: set[str] = set()
         requires_tools = bool(tools)
         requires_vision = self._requires_vision(messages)
-        for provider_id in self._ids():
+        profile = classify_task_profile(messages, tools)
+        self.last_profile = profile
+        for provider_id in self._ordered_ids(profile, messages, tools):
             if provider_id in attempted or self._cooling(provider_id):
                 continue
             attempted.add(provider_id)
+            cfg = self._config(provider_id)
+            if str(cfg.get("enabled") or "1").strip().lower() in {"0", "false", "off", "disabled"}:
+                continue
             try:
                 provider = self._build(provider_id)
-                if provider_id != self.primary_id and not self._compatible(
+                if not self._compatible(
                     provider,
                     requires_tools=requires_tools,
                     requires_vision=requires_vision,
                 ):
                     continue
                 self._copy_primary_caps(provider)
-                if provider_id == self.primary_id:
-                    self.caps.update(self._provider_caps(provider))
+                self.last_selected_provider = provider_id
+                selection = (profile, provider_id)
+                if selection not in self.selection_log:
+                    self.selection_log.append(selection)
+                if self._selection_logger is not None:
+                    try:
+                        self._selection_logger(profile, provider_id)
+                    except Exception:
+                        pass
                 text, calls = provider.complete(
                     messages,
                     tools,
