@@ -51,6 +51,7 @@ from typing import Any, AsyncIterator, Optional
 
 from . import schema
 from .base import DEFAULT_CAPS, FunctionCall, Msg
+from core.ai_errors import classify_error
 
 # How much conversation to carry. Gemini Live compresses its own context with a
 # sliding window server-side; a stateless chat API has no such thing, so the
@@ -720,12 +721,13 @@ class PipelineEngine:
         import traceback
 
         where = _target_of(provider)
-        detail = " ".join(str(exc).split())[:160] or exc.__class__.__name__
+        info = classify_error(exc, provider=_name_of(provider))
+        detail = info.message[:160] or exc.__class__.__name__
         self._log(f"SYS: {what} failed{f' ({where})' if where else ''} - "
-                  f"{type(exc).__name__}: {detail}")
+                  f"{info.kind.value}: {detail}")
         _console(f"[Pipeline] {what} failed"
                  f"{f' at {where}' if where else ''}: "
-                 f"{type(exc).__name__}: {detail}")
+                 f"{info.kind.value}: {detail}")
         traceback.print_exception(type(exc), exc, exc.__traceback__)
 
     async def _emit(self, msg: Msg) -> None:

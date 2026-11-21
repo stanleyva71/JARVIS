@@ -394,6 +394,14 @@ class OpenAICompatLLM:
             self._vision_known = ""
 
     # -- headers ------------------------------------------------------------
+    def _policy_id(self) -> str:
+        low = self.base.lower()
+        if "openrouter.ai" in low:
+            return "openai_compat@openrouter"
+        if "api.groq.com" in low:
+            return "openai_compat@groq"
+        return "openai_compat"
+
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
         if self.key:
@@ -423,6 +431,11 @@ class OpenAICompatLLM:
                  temperature: float | None = None) -> tuple[str, list[FunctionCall]]:
         """Text and any tool calls. Raises on failure so the ladder can read the
         error, classify it and rest this rung exactly as it rests a Gemini one."""
+        from core.ai_policy import validate_provider
+        validate_provider(
+            self._policy_id(),
+            {"base_url": self.base, "model": self.model},
+        )
         try:
             with self._httpx.Client(timeout=timeout or self.timeout,
                                     trust_env=self._trust_env) as cl:
@@ -451,6 +464,11 @@ class OpenAICompatLLM:
         the end. Streaming is what lets speech start before the sentence is
         finished; a server that cannot stream still works, it just answers all
         at once."""
+        from core.ai_policy import validate_provider
+        validate_provider(
+            self._policy_id(),
+            {"base_url": self.base, "model": self.model},
+        )
         body = self._body(messages, tools, stream, temperature)
 
         # Not wrapped with the address here: the streaming path is only used by

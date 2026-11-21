@@ -28,6 +28,7 @@ import importlib
 from typing import Any, Optional
 
 from .base import Field, caps_of, validate
+from core.ai_policy import validate_provider
 
 # Every provider module in this package, by kind. Listed rather than scanned —
 # see the module docstring. A name here that does not import is reported and
@@ -146,6 +147,10 @@ def build(provider_id: str, cfg: dict):
     decl = get_declaration(provider_id)
     if decl is None:
         raise LookupError(f"no provider called {provider_id!r}")
+    # Unqualified ids are retained for old local configurations. Hosted
+    # catalog entries are validated before they can be built.
+    if "@" in str(provider_id):
+        validate_provider(provider_id, cfg, declaration=decl)
     if not decl.get("_available", True):
         missing = ", ".join(decl.get("requires", ()))
         raise RuntimeError(f"{decl['label']} needs {missing}, which is not installed")

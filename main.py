@@ -2452,6 +2452,8 @@ class JarvisLive:
         client being rebuilt on every reconnect.
         """
         if self._engine_caps is None:
+            from core.ai_policy import validate_gemini_model
+            validate_gemini_model(live_model, live=True)
             client = genai.Client(
                 api_key=_get_api_key(),
                 http_options={"api_version":

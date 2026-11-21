@@ -521,6 +521,72 @@ def test_addresses():
         check(f"{raw}  ->  {_normalise(raw)}", _normalise(raw) == want, want)
 
 
+def test_ai_policy_and_errors():
+    from core.ai_errors import ErrorKind, classify_error, redact_credentials
+    from core.ai_policy import PolicyViolation, validate_provider
+
+    section("[20] AI policy and error classification")
+
+    def blocked(provider_id, cfg):
+        try:
+            validate_provider(provider_id, cfg)
+        except PolicyViolation:
+            return True
+        return False
+
+    check("local provider without key is allowed",
+          validate_provider(
+              "openai_compat@ollama",
+              {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen3:8b"},
+          ).local)
+    check("OpenRouter paid model is blocked",
+          blocked("openai_compat@openrouter",
+                  {"base_url": "https://openrouter.ai/api/v1",
+                   "model": "openai/gpt-4o"}))
+    check("OpenRouter free model is allowed",
+          validate_provider(
+              "openai_compat@openrouter",
+              {"base_url": "https://openrouter.ai/api/v1",
+               "model": "meta-llama/llama-3.1-8b-instruct:free"},
+          ).free_only)
+    check("Groq approved free model is allowed",
+          validate_provider(
+              "openai_compat@groq",
+              {"base_url": "https://api.groq.com/openai/v1",
+               "model": "llama-3.1-8b-instant", "api_key": "secret"},
+          ).free_only)
+    check("unknown provider is blocked",
+          blocked("unknown@service",
+                  {"model": "m", "base_url": "http://127.0.0.1"}))
+    check("paid provider is blocked",
+          blocked("openai_compat@openai",
+                  {"model": "gpt-4o", "base_url": "https://api.openai.com/v1"}))
+
+    cases = (
+        ("401 unauthorized", ErrorKind.AUTHENTICATION),
+        ("429 quota exhausted", ErrorKind.QUOTA_EXHAUSTED),
+        ("timeout while waiting", ErrorKind.TIMEOUT),
+        ("connection refused", ErrorKind.CONNECTION),
+        ("503 service unavailable", ErrorKind.UNAVAILABLE),
+        ("404 model not found", ErrorKind.MODEL_NOT_FOUND),
+        ("invalid configuration: no model", ErrorKind.INVALID_CONFIGURATION),
+        ("invalid response: malformed JSON", ErrorKind.INVALID_RESPONSE),
+    )
+    for message, expected in cases:
+        check(f"classifies {expected.value}",
+              classify_error(message).kind is expected)
+
+    partial = classify_error("timeout after streamed text", partial=True)
+    check("partial responses are not recoverable",
+          partial.kind is ErrorKind.TIMEOUT and not partial.recoverable)
+
+    safe = redact_credentials(
+        "api_key=SECRET token=TOKEN Authorization: Bearer BEARER", "SECRET"
+    )
+    check("credentials are redacted from log text",
+          all(value not in safe for value in ("SECRET", "TOKEN", "BEARER")))
+
+
 def test_costs_nothing_when_unused():
     section("[9] A default install pays nothing")
     import subprocess
@@ -1094,6 +1160,7 @@ async def main() -> int:
     test_voice_folder_is_writable()
     test_a_chosen_voice_downloads_itself()
     test_panel_settings_survive()
+    test_ai_policy_and_errors()
 
     print(f"\n{'=' * 56}")
     print(f"{_ok} passed, {_fail} failed")

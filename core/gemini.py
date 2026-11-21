@@ -73,6 +73,9 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from .ai_errors import classify_error, redact_credentials
+from .ai_policy import PolicyViolation, validate_gemini_model, validate_provider
+
 if getattr(sys, "frozen", False):
     _BASE = Path(sys.executable).parent
 else:
@@ -505,6 +508,7 @@ def _live_call(contents, config, timeout_ms: int, key: str):
     Reconnecting costs 0.24s, so nothing is kept alive between calls — no
     session lifetime cap to manage, no GoAway to handle, no shared state.
     """
+    validate_gemini_model(_live_model(), live=True)
     system = ""
     if config is not None:
         system = getattr(config, "system_instruction", None) or \
@@ -639,6 +643,8 @@ def _provider_call(model: str, contents, config, timeout_ms: int):
 
     pid = model[len(PROVIDER_PREFIX):]
     cfg = get_provider_config(pid)
+    decl = registry.get_declaration(pid)
+    validate_provider(pid, cfg, declaration=decl)
     missing = registry.missing_fields(pid, cfg)
     if missing:
         raise RuntimeError(f"404 not configured: {', '.join(missing)}")
@@ -718,6 +724,10 @@ def call(contents, tier: str = FAST, config=None,
     for model in tried:
         try:
             if model == LIVE:
+                validate_gemini_model(_live_model(), live=True)
+            elif not model.startswith(PROVIDER_PREFIX):
+                validate_gemini_model(model)
+            if model == LIVE:
                 reply = _live_call(contents, config, timeout_ms, resolved_key)
                 if reply is not None:
                     return reply
@@ -731,7 +741,11 @@ def call(contents, tier: str = FAST, config=None,
                 kwargs["config"] = config
             return cl.models.generate_content(**kwargs)
         except Exception as e:
-            msg = str(e)
+            info = classify_error(e, model=model, partial=False)
+            msg = redact_credentials(info.message, resolved_key)
+            if isinstance(e, PolicyViolation):
+                print(f"[Gemini] policy blocked {model}: {msg}")
+                continue
             if is_quota_error(msg):
                 _cool(model)
                 print(f"[Gemini] {model}: out of quota — skipping it for "
@@ -744,7 +758,8 @@ def call(contents, tier: str = FAST, config=None,
                 print(f"[Gemini] {model}: not answering — resting it for "
                       f"{_UNAVAILABLE_SECONDS // 60} minutes")
             else:
-                print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
+                print(f"[Gemini] {model} [{info.kind.value}]: "
+                      f"{type(e).__name__}: {msg[:140]}")
     return None
 
 
