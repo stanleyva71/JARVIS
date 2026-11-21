@@ -26,7 +26,6 @@ WHY THIS IS CACHED
 from __future__ import annotations
 
 import threading
-import sys
 import time
 from typing import Optional
 
@@ -125,10 +124,6 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
     probe is inaudible; input reads and discards."""
     if api_key in _probe_results:
         return _probe_results[api_key]
-    if sys.platform == "win32" and sys.version_info[:2] >= (3, 13):
-        _probe_results[api_key] = True
-        return True
-
     ok = False
     try:
         import sounddevice as sd
@@ -221,12 +216,6 @@ def _usable(idx: int, kind: str) -> bool:
     supported or cannot be translated" [MME error 32]. Opening and immediately
     closing costs milliseconds and is the only answer that holds."""
     st = None
-    # Native audio streams are not probed automatically on Windows/Python 3.13:
-    # opening several PortAudio streams concurrently during startup can raise
-    # an access violation in sounddevice instead of an exception, terminating
-    # JARVIS and the Qt/Chloe renderer together.
-    if sys.platform == "win32" and sys.version_info[:2] >= (3, 13):
-        return True
     try:
         import sounddevice as sd
         rate = _RATES.get(kind, 16000)

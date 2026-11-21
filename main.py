@@ -32,25 +32,6 @@ for _stream in ("stdout", "stderr"):
     except Exception:
         pass          # pythonw / redirected pipes / anything exotic — never fatal
 
-# MARK LIV is tested through Python 3.13. Python 3.14+ can import PyQt6 and
-# PyOpenGL while still terminating native OpenGL without a recoverable Python
-# exception. Relaunch Windows through the supported interpreter.
-if _platform.system() == "Windows" and _sys.version_info[:2] > (3, 13):
-    from pathlib import Path as _Path
-    try:
-        code = _subprocess.call(
-            ["py", "-3.13", _sys.argv[0], *_sys.argv[1:]],
-            cwd=str(_Path(_sys.argv[0]).resolve().parent),
-        )
-    except Exception as exc:
-        print(
-            "[JARVIS] Python 3.13 is required for the 3D HUD "
-            f"and could not be started automatically: {exc}",
-            file=_sys.stderr,
-        )
-        code = 1
-    raise SystemExit(code)
-
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio

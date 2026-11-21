@@ -467,6 +467,7 @@ class HudCanvas(QWidget):
         self._chloe = None
         self._chloe_ready = False
         self._chloe_error = ""
+        self._chloe_initializing = False
 
         self._requested_hud_style = self.hud_style
         if self.hud_style == "chloe" and not self._ensure_chloe():
@@ -537,13 +538,19 @@ class HudCanvas(QWidget):
                 self._chloe_error = str(exc)
                 print(f"[Chloe] Could not create 3D widget: {exc}", flush=True)
                 return False
-        if not self._chloe.isVisible():
-            # Start at a 1-pixel viewport so native OpenGL cannot paint a
-            # large black surface over the HUD while initializeGL is running.
-            self._chloe.setGeometry(0, 0, 1, 1)
-            self._chloe.hide()
-            self._chloe.show()
-            QTimer.singleShot(8000, self._chloe_ready_timeout)
+
+        if self._chloe_ready:
+            self._position_chloe()
+            self._chloe.raise_()
+            if not self._chloe.isVisible():
+                self._chloe.show()
+        else:
+            # Keep the traditional avatar visible; do not let the native
+            # OpenGL surface cover the HUD until initialization is confirmed.
+            if not self._chloe_initializing:
+                self._chloe_initializing = True
+                self._chloe.setGeometry(0, 0, 1, 1)
+                self._chloe.show()
         return True
 
     def _position_chloe(self) -> None:
@@ -571,6 +578,7 @@ class HudCanvas(QWidget):
         self._chloe_ready = ready
         self._chloe_error = error
         if ready:
+            self._chloe_initializing = False
             if self._requested_hud_style == "chloe":
                 self.hud_style = "chloe"
                 self._position_chloe()
@@ -590,13 +598,6 @@ class HudCanvas(QWidget):
             if self._chloe is not None:
                 self._chloe.hide()
             self.update()
-
-    def _chloe_ready_timeout(self) -> None:
-        if self._requested_hud_style == "chloe" and not self._chloe_ready:
-            self._on_chloe_ready(
-                False,
-                "OpenGL Chloe did not finish initialization within 8 seconds",
-            )
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
         """Thread-safe: hand over a schedule of (level, openness, width) frames.

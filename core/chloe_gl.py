@@ -181,6 +181,9 @@ class ChloeGLWidget(QOpenGLWidget):
             self._fail("GLB not found in assets/private")
             return
         try:
+            context = self.context()
+            if context is None or not context.isValid():
+                raise RuntimeError("Qt OpenGL context is not valid")
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
             GL.glClearColor(0.0, 0.023529, 0.039216, 1.0)
             GL.glViewport(0, 0, self.width(), self.height())
@@ -206,13 +209,16 @@ class ChloeGLWidget(QOpenGLWidget):
     def paintGL(self):
         if GL is None:
             return
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
-        ratio = getattr(self, "devicePixelRatioF", lambda: 1.0)()
-        GL.glViewport(0, 0, int(self.width() * ratio), int(self.height() * ratio))
-        if not self._ready or not self._active:
-            GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
-            return
         try:
+            context = self.context()
+            if context is None or not context.isValid():
+                raise RuntimeError("Qt OpenGL context was lost")
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
+            ratio = getattr(self, "devicePixelRatioF", lambda: 1.0)()
+            GL.glViewport(0, 0, int(self.width() * ratio), int(self.height() * ratio))
+            if not self._ready or not self._active:
+                GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+                return
             GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
             self._animate()
             self._draw()
@@ -329,82 +335,15 @@ class ChloeGLWidget(QOpenGLWidget):
         return lo, hi
 
     def _animate(self):
-        # Safe authored-pose idle: a slow, restrained turn while skeletal
-        # channels are held until their matrix convention is fully validated.
+        # The GLB idle clip has not been enabled safely for skinning yet. Keep
+        # the character in its authored bind pose instead of applying channels
+        # whose matrix convention may corrupt the geometry.
         t = time.monotonic() - self._start_time
         idle_turn = math.radians(1.5) * math.sin(t * 0.75)
         idle_breathe = 1.0 + 0.0025 * math.sin(t * 1.25)
         yaw = _mat_y_rotation(idle_turn)
         breathe = _mat_scale((idle_breathe, 1.0, idle_breathe))
         self._model_matrix = yaw @ breathe @ self._model_base
-        return
-        nodes = self._gltf.nodes or []
-        local = [m.copy() for m in self._node_matrices]
-        trs = []
-        for i, node in enumerate(nodes):
-            trs.append({
-                "matrix": bool(node.matrix),
-                "translation": np.array(node.translation if node.translation else [0,0,0], dtype=np.float32),
-                "rotation": np.array(node.rotation if node.rotation else [0,0,0,1], dtype=np.float32),
-                "scale": np.array(node.scale if node.scale else [1,1,1], dtype=np.float32),
-            })
-        if self._animation and self._duration > 0:
-            t = (time.monotonic() - self._start_time) % self._duration
-            for channel in self._animation.channels:
-                target = channel.target
-                sampler = self._animation.samplers[channel.sampler]
-                times = self._accessor(sampler.input)[:, 0]
-                values = self._accessor(sampler.output)
-                if t <= times[0]:
-                    value = values[0]
-                elif t >= times[-1]:
-                    value = values[-1]
-                else:
-                    right = int(np.searchsorted(times, t, side="right"))
-                    left = max(0, right - 1)
-                    right = min(right, len(times)-1)
-                    span = float(times[right] - times[left])
-                    alpha = 0.0 if span <= 0 else (float(t) - times[left]) / span
-                    if target.path == "rotation":
-                        value = self._slerp(values[left], values[right], alpha)
-                    elif sampler.interpolation == "STEP":
-                        value = values[left]
-                    else:
-                        value = values[left] * (1-alpha) + values[right] * alpha
-
-                node_index = target.node
-                if target.path in ("translation", "rotation", "scale"):
-                    trs[node_index][target.path] = np.asarray(value, dtype=np.float32)
-        for i, state in enumerate(trs):
-            if not state["matrix"]:
-                local[i] = (
-                    _mat_translation(state["translation"])
-                    @ _mat_quaternion(state["rotation"])
-                    @ _mat_scale(state["scale"])
-                )
-
-        globals_ = [None] * len(nodes)
-        parents = [-1] * len(nodes)
-        for i, node in enumerate(nodes):
-            if node.children:
-                for child in node.children:
-                    parents[child] = i
-        for i in range(len(nodes)):
-            parent = parents[i]
-            globals_[i] = (globals_[parent] @ local[i]) if parent >= 0 else local[i]
-
-        skin = self._gltf.skins[0] if self._gltf.skins else None
-        palettes = []
-        if skin:
-            for joint_index, joint in enumerate(self._joints):
-                ibm = self._inverse_bind[joint_index] if joint_index < len(self._inverse_bind) else _mat_identity()
-                palettes.append(globals_[joint] @ ibm)
-        if not palettes:
-            palettes = [_mat_identity()]
-        while len(palettes) < 64:
-            palettes.append(_mat_identity())
-
-        self._joint_palette = np.asarray(palettes[:64], dtype=np.float32)
 
     @staticmethod
     def _slerp(a, b, t):
@@ -461,12 +400,18 @@ class ChloeGLWidget(QOpenGLWidget):
                 base *= texture(uTexture, vUV).rgb;
             }
             vec3 n = normalize(vNormal);
-            vec3 lightDir = normalize(vec3(-0.4, 0.7, 1.0));
-            vec3 key = normalize(vec3(0.45, 0.35, 0.9));
-            float diffuse = max(dot(n, lightDir), 0.0);
-            float rim = pow(1.0 - max(dot(n, normalize(vec3(0.0, 0.2, 1.0))), 0.0), 3.0);
-            float spec = pow(max(dot(reflect(-key, n), normalize(-vWorld)), 0.0), 24.0);
-            vec3 color = base * (0.42 + 0.58 * diffuse) + base * rim * 0.22 + vec3(1.0) * spec * 0.16;
+            vec3 keyDir = normalize(vec3(-0.35, 0.65, 1.0));
+            vec3 fillDir = normalize(vec3(0.60, 0.25, 0.75));
+            vec3 rimDir = normalize(vec3(0.0, 0.55, -1.0));
+            float key = max(dot(n, keyDir), 0.0);
+            float fill = max(dot(n, fillDir), 0.0);
+            float rim = pow(1.0 - max(dot(n, normalize(vec3(0.0, 0.15, 1.0))), 0.0), 3.0);
+            float backRim = max(dot(n, rimDir), 0.0);
+            float spec = pow(max(dot(reflect(-keyDir, n), normalize(-vWorld)), 0.0), 32.0);
+            vec3 color = base * (0.38 + 0.48 * key + 0.16 * fill)
+                       + base * rim * 0.24
+                       + base * backRim * 0.10
+                       + vec3(1.0) * spec * 0.14;
             fragColor = vec4(color, uBaseColor.a);
         }
         """
