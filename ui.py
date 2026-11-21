@@ -468,6 +468,7 @@ class HudCanvas(QWidget):
         self._chloe_ready = False
         self._chloe_error = ""
         self._chloe_initializing = False
+        self._chloe_init_timer = None
 
         self._requested_hud_style = self.hud_style
         if self.hud_style == "chloe" and not self._ensure_chloe():
@@ -527,16 +528,17 @@ class HudCanvas(QWidget):
         """Create the OpenGL context only when Chloe is explicitly selected."""
         if ChloeGLWidget is None:
             self._chloe_error = "The Chloe 3D renderer is unavailable"
+            print(f"[Chloe] Falha: {self._chloe_error}", flush=True)
             return False
         if self._chloe is None:
             try:
                 self._chloe = ChloeGLWidget(BASE_DIR, self)
                 self._chloe.ready_changed.connect(self._on_chloe_ready)
-                self._chloe.hide()
+                print("[Chloe] Criada.", flush=True)
             except Exception as exc:
                 self._chloe = None
                 self._chloe_error = str(exc)
-                print(f"[Chloe] Could not create 3D widget: {exc}", flush=True)
+                print(f"[Chloe] Falha ao criar widget: {exc}", flush=True)
                 return False
 
         if self._chloe_ready:
@@ -544,14 +546,34 @@ class HudCanvas(QWidget):
             self._chloe.raise_()
             if not self._chloe.isVisible():
                 self._chloe.show()
+                print("[Chloe] Widget expandido e exibido.", flush=True)
         else:
-            # Keep the traditional avatar visible; do not let the native
-            # OpenGL surface cover the HUD until initialization is confirmed.
+            # Never hide the initialization surface. At 1x1 it only creates the
+            # native OpenGL context; paintEvent still draws the traditional
+            # avatar/core as the visible placeholder.
             if not self._chloe_initializing:
                 self._chloe_initializing = True
                 self._chloe.setGeometry(0, 0, 1, 1)
                 self._chloe.show()
+                print("[Chloe] Widget exibido para inicialização (1x1).", flush=True)
+                self._chloe_init_timer = QTimer(self)
+                self._chloe_init_timer.setSingleShot(True)
+                self._chloe_init_timer.timeout.connect(self._on_chloe_init_timeout)
+                self._chloe_init_timer.start(30000)
         return True
+
+    def _clear_chloe_init_timeout(self) -> None:
+        if self._chloe_init_timer is not None:
+            self._chloe_init_timer.stop()
+            self._chloe_init_timer.deleteLater()
+            self._chloe_init_timer = None
+
+    def _on_chloe_init_timeout(self) -> None:
+        if not self._chloe_initializing:
+            return
+        message = "Inicialização da Chloe excedeu 30 segundos"
+        print(f"[Chloe] Falha: {message}", flush=True)
+        self._on_chloe_ready(False, message)
 
     def _position_chloe(self) -> None:
         if self._chloe is None:
@@ -579,17 +601,30 @@ class HudCanvas(QWidget):
         self._chloe_error = error
         if ready:
             self._chloe_initializing = False
+            self._clear_chloe_init_timeout()
             if self._requested_hud_style == "chloe":
                 self.hud_style = "chloe"
                 self._position_chloe()
                 if self._chloe is not None:
+                    self._chloe.set_active(True)
                     self._chloe.raise_()
                     self._chloe.show()
+                    rect = self._chloe.geometry()
+                    print(
+                        f"[Chloe] Widget expandido e exibido "
+                        f"({rect.width()}x{rect.height()} em {rect.x()},{rect.y()}).",
+                        flush=True,
+                    )
+            elif self._chloe is not None:
+                self._chloe.hide()
             self.update()
             return
-        print(f"[Chloe] Falling back from Chloe 3D: {error}", flush=True)
+        self._chloe_initializing = False
+        self._clear_chloe_init_timeout()
+        print(f"[Chloe] Falha e fallback: {error}", flush=True)
         if self._requested_hud_style == "chloe":
             self.hud_style = "face" if self._avatar is not None else "core"
+            self._requested_hud_style = self.hud_style
             try:
                 from memory.config_manager import save_hud_style
                 save_hud_style(self.hud_style)
@@ -597,6 +632,8 @@ class HudCanvas(QWidget):
                 pass
             if self._chloe is not None:
                 self._chloe.hide()
+                self._chloe.deleteLater()
+                self._chloe = None
             self.update()
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
@@ -732,8 +769,6 @@ class HudCanvas(QWidget):
         if self.hud_style == "chloe" and self._ensure_chloe():
             pass
         elif self._avatar is not None and self.hud_style == "face":
-            if self._chloe is not None:
-                self._chloe.hide()
             self._avatar.step(dt, amp, speaking=self.speaking,
                               muted=self.muted, state=self.state,
                               v_open=v_open, v_wide=v_wide or 0.0,
@@ -1000,7 +1035,10 @@ class HudCanvas(QWidget):
         _sy_status = cy + fw * 0.40
         if self.hud_style == "chloe" and self._chloe_ready and self._chloe is not None:
             self._chloe.raise_()
-        elif self._avatar is not None and self.hud_style == "face":
+        elif self.hud_style == "face" or (
+                self.hud_style == "chloe"
+                and (self._chloe_initializing or not self._chloe_ready)
+                and self._avatar is not None):
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
             _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08))
@@ -1025,8 +1063,6 @@ class HudCanvas(QWidget):
         # was unreachable (no such file ships) and the bare orb it fell through
         # to is what this replaces.
         else:
-            if self._chloe is not None:
-                self._chloe.hide()
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
             _r = min(W * 0.46, _band_h / 2.0)
@@ -7165,6 +7201,15 @@ class MainWindow(QMainWindow):
                 if not self.hud._ensure_chloe():
                     self.hud.hud_style = "face" if self.hud._avatar is not None else "core"
                     save_hud_style(self.hud.hud_style)
+            else:
+                # Hide Chloe only after the user explicitly selects face/core.
+                if self.hud._chloe is not None:
+                    self.hud._chloe.hide()
+                    if not self.hud._chloe_ready:
+                        self.hud._chloe.deleteLater()
+                        self.hud._chloe = None
+                        self.hud._chloe_initializing = False
+                        self.hud._clear_chloe_init_timeout()
             self.hud.update()
         except Exception:
             pass

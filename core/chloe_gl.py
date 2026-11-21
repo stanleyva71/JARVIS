@@ -174,6 +174,7 @@ class ChloeGLWidget(QOpenGLWidget):
         GL.glViewport(0, 0, int(width * ratio), int(height * ratio))
 
     def initializeGL(self):
+        print("[Chloe] initializeGL() iniciado.", flush=True)
         if GL is None or GLTF2 is None:
             self._fail(f"3D unavailable: {_IMPORT_ERROR}")
             return
@@ -184,6 +185,7 @@ class ChloeGLWidget(QOpenGLWidget):
             context = self.context()
             if context is None or not context.isValid():
                 raise RuntimeError("Qt OpenGL context is not valid")
+            print("[Chloe] Contexto OpenGL válido.", flush=True)
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
             GL.glClearColor(0.0, 0.023529, 0.039216, 1.0)
             GL.glViewport(0, 0, self.width(), self.height())
@@ -195,6 +197,7 @@ class ChloeGLWidget(QOpenGLWidget):
             self._upload_textures()
             self._upload_primitives()
             self._ready = True
+            print("[Chloe] Renderização pronta.", flush=True)
             self.ready_changed.emit(True, "")
         except Exception as exc:
             self._fail(f"Could not render Chloe: {exc}")
@@ -227,6 +230,7 @@ class ChloeGLWidget(QOpenGLWidget):
 
     def _load_model(self):
         self._gltf = GLTF2().load(str(self._model_path))
+        print(f"[Chloe] GLB carregado: {self._model_path}", flush=True)
         self._binary = self._gltf.binary_blob()
         if not isinstance(self._binary, (bytes, bytearray, memoryview)):
             raise RuntimeError("GLB binary buffer is unavailable")
@@ -426,6 +430,7 @@ class ChloeGLWidget(QOpenGLWidget):
         GL.glDeleteShader(vs)
         GL.glDeleteShader(fs)
         GL.glUseProgram(self._program)
+        print("[Chloe] Shaders compilados.", flush=True)
 
     def _compile_shader_stage(self, kind, source):
         shader = GL.glCreateShader(kind)

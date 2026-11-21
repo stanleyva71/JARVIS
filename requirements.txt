@@ -103,7 +103,7 @@ ddgs>=9,<10                  # web_search — sucessor mantido do
 pdfplumber                   # file_processor — texto e tabelas de PDFs
 PyPDF2                       # file_processor — leitor alternativo de PDF
 python-docx                  # file_processor — leitura de arquivos .docx
-pynvml                       # system_monitor e medidor de GPU do HUD (NVIDIA)
+nvidia-ml-py                  # system_monitor e medidor de GPU do HUD (NVIDIA)
 
 # ── Opcionais: dependências pesadas, instale somente se quiser o recurso ─────
 # Foram deixadas de fora intencionalmente: juntas, ocupam várias centenas de
