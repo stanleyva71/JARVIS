@@ -593,6 +593,13 @@ def test_ai_policy_and_errors():
             return True
         return False
 
+    def blocked_call(fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except PolicyViolation:
+            return True
+        return False
+
     check("local provider without key is allowed",
           validate_provider(
               "openai_compat@ollama",
@@ -609,6 +616,19 @@ def test_ai_policy_and_errors():
     check("OpenRouter HTTP endpoint is blocked",
           blocked("openai_compat@openrouter",
                   {"base_url": "http://openrouter.ai/api/v1",
+                   "model": "meta-llama/llama-3.1-8b-instruct:free"}))
+    for suffix in ("?key=leak", "#fragment", "/extra"):
+        check(f"OpenRouter malformed path component {suffix} is blocked",
+              blocked("openai_compat@openrouter",
+                      {"base_url": f"https://openrouter.ai/api/v1{suffix}",
+                       "model": "meta-llama/llama-3.1-8b-instruct:free"}))
+    check("OpenRouter userinfo is blocked",
+          blocked("openai_compat@openrouter",
+                  {"base_url": "https://user:pass@openrouter.ai/api/v1",
+                   "model": "meta-llama/llama-3.1-8b-instruct:free"}))
+    check("OpenRouter non-default port is blocked",
+          blocked("openai_compat@openrouter",
+                  {"base_url": "https://openrouter.ai:8443/api/v1",
                    "model": "meta-llama/llama-3.1-8b-instruct:free"}))
     check("OpenRouter free model is allowed",
           validate_provider(
@@ -630,6 +650,19 @@ def test_ai_policy_and_errors():
           blocked("openai_compat@groq",
                   {"base_url": "http://api.groq.com/openai/v1",
                    "model": "llama-3.1-8b-instant"}))
+    for suffix in ("?key=leak", "#fragment", "/extra"):
+        check(f"Groq malformed path component {suffix} is blocked",
+              blocked("openai_compat@groq",
+                      {"base_url": f"https://api.groq.com/openai/v1{suffix}",
+                       "model": "llama-3.1-8b-instant"}))
+    check("Groq userinfo is blocked",
+          blocked("openai_compat@groq",
+                  {"base_url": "https://user:pass@api.groq.com/openai/v1",
+                   "model": "llama-3.1-8b-instant"}))
+    check("Groq non-default port is blocked",
+          blocked("openai_compat@groq",
+                  {"base_url": "https://api.groq.com:8443/openai/v1",
+                   "model": "llama-3.1-8b-instant"}))
     check("remote local endpoint is blocked",
           blocked("openai_compat@ollama",
                   {"base_url": "http://192.168.1.50:11434/v1",
@@ -643,6 +676,22 @@ def test_ai_policy_and_errors():
     check("local endpoints never receive an API key",
           "Authorization" not in local_with_key._headers(
               local_with_key._validate_request()))
+    unsafe = OpenAICompatLLM({
+        "base_url": "https://api.groq.com.evil.test/openai/v1",
+        "model": "llama-3.1-8b-instant",
+        "api_key": "REMOTE_SECRET",
+    })
+    check("invalid Groq endpoint rejects before creating an HTTP request",
+          blocked_call(unsafe.models))
+    from providers.stt_whisper import WhisperSTT
+    unsafe_whisper = WhisperSTT({
+        "backend": "api",
+        "base_url": "https://api.groq.com.evil.test/openai/v1",
+        "model": "whisper-large-v3-turbo",
+        "api_key": "WHISPER_SECRET",
+    })
+    check("invalid Groq Whisper endpoint rejects before sending its key",
+          blocked_call(unsafe_whisper._api_blocking, b"\0" * 3200, 16000))
     check("unknown provider is blocked",
           blocked("unknown@service",
                   {"model": "m", "base_url": "http://127.0.0.1"}))
@@ -676,6 +725,176 @@ def test_ai_policy_and_errors():
     )
     check("credentials are redacted from log text",
           all(value not in safe for value in ("SECRET", "TOKEN", "BEARER")))
+
+
+async def test_ai_router_fallback():
+    from core.ai_router import AIRouter
+    from memory.config_manager import (get_ai_router_alternatives,
+                                       save_ai_router_alternatives)
+
+    section("[22] AI Router fallback")
+
+    before_alternatives = get_ai_router_alternatives()
+    try:
+        save_ai_router_alternatives(("openai_compat@ollama",
+                                     "openai_compat@groq",
+                                     "openai_compat@ollama"))
+        check("alternative provider order is persisted",
+              get_ai_router_alternatives()
+              == ["openai_compat@ollama", "openai_compat@groq"])
+    finally:
+        save_ai_router_alternatives(before_alternatives)
+
+    calls: list[str] = []
+
+    class FakeLLM:
+        caps = {"tools": True, "tool_format": "openai"}
+
+        def __init__(self, name: str, events: list[dict] | None = None,
+                     error: Exception | None = None):
+            self.name = name
+            self.events = events or []
+            self.error = error
+
+        async def chat(self, messages, tools=None, **kwargs):
+            calls.append(self.name)
+            for event in self.events:
+                yield event
+            if self.error:
+                raise self.error
+
+    def config_getter(provider_id):
+        if "ollama" in provider_id:
+            return {"base_url": "http://127.0.0.1:11434/v1",
+                    "model": "qwen3:8b"}
+        if "groq" in provider_id:
+            return {"base_url": "https://api.groq.com/openai/v1",
+                    "model": "llama-3.1-8b-instant", "api_key": "gsk-test"}
+        if "openrouter" in provider_id:
+            return {"base_url": "https://openrouter.ai/api/v1",
+                    "model": "meta-llama/llama-3.1-8b-instruct:free",
+                    "api_key": "sk-test"}
+        return {"base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o", "api_key": "sk-paid"}
+
+    primary = "openai_compat@groq"
+    ollama = "openai_compat@ollama"
+    openrouter = "openai_compat@openrouter"
+
+    def collect(router):
+        async def run():
+            events = []
+            async for event in router.chat([{"role": "user", "content": "hi"}]):
+                events.append(event)
+            return events
+        return run()
+
+    router = AIRouter(primary, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid, [{"text": "Primary answer"}]))
+    events = await collect(router)
+    check("primary works without fallback",
+          calls[-1:] == [primary] and events == [{"text": "Primary answer"}])
+
+    calls.clear()
+    router = AIRouter(primary, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid,
+                          [{"text": "fallback"}] if pid == ollama else [],
+                          RuntimeError("429 quota exhausted") if pid == primary
+                          else None))
+    events = await collect(router)
+    check("quota exhausted falls back",
+          calls == [primary, ollama] and events == [{"text": "fallback"}])
+
+    calls.clear()
+    router = AIRouter(primary, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid,
+                          [{"text": "local answer"}] if pid == ollama else [],
+                          RuntimeError("Connection refused") if pid == primary
+                          else None))
+    events = await collect(router)
+    check("connection failure falls back to Ollama",
+          calls == [primary, ollama] and events == [{"text": "local answer"}])
+
+    calls.clear()
+    paid = "openai_compat@openai"
+    router = AIRouter(paid, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(pid))
+    try:
+        await collect(router)
+        paid_blocked = False
+    except Exception:
+        paid_blocked = True
+    check("paid provider is blocked and never called",
+          paid_blocked and paid not in calls)
+
+    calls.clear()
+    router = AIRouter(primary, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid,
+                          [{"text": "Partial text"}] if pid == primary else [],
+                          RuntimeError("timeout") if pid == primary else None))
+    try:
+        await collect(router)
+        partial_blocked = False
+    except RuntimeError:
+        partial_blocked = True
+    check("fallback stops after partial text",
+          partial_blocked and calls == [primary])
+
+    calls.clear()
+    tool_call = {"tool_calls": [{"id": "call1", "name": "open_app",
+                                 "args": {"app_name": "chrome"}}]}
+    router = AIRouter(primary, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid,
+                          [tool_call] if pid == primary else [],
+                          RuntimeError("timeout") if pid == primary else None))
+    try:
+        await collect(router)
+        tool_blocked = False
+    except RuntimeError:
+        tool_blocked = True
+    check("fallback stops before duplicate tool execution",
+          tool_blocked and calls == [primary])
+
+    calls.clear()
+    router = AIRouter(primary, (ollama,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid,
+                          [{"text": "ok"}] if pid == ollama else [],
+                          RuntimeError("503 service unavailable")
+                          if pid == primary else None))
+    await collect(router)
+    cooled = router.cooling_until(primary) > 0
+    calls.clear()
+    await collect(router)
+    check("cooldown skips an unavailable provider",
+          cooled and calls == [ollama])
+
+    calls.clear()
+    router = AIRouter(primary, (openrouter,),
+                      config_getter=config_getter,
+                      builder=lambda pid, cfg: FakeLLM(
+                          pid,
+                          [],
+                          RuntimeError("401 invalid api key")))
+    try:
+        await collect(router)
+        all_failed = False
+    except RuntimeError:
+        all_failed = True
+    check("all providers fail safely without fallback on authentication",
+          all_failed and calls == [primary])
 
 
 def test_costs_nothing_when_unused():
@@ -1253,6 +1472,7 @@ async def main() -> int:
     test_panel_settings_survive()
     test_ai_policy_and_errors()
     await test_partial_streaming_is_not_recoverable()
+    await test_ai_router_fallback()
 
     print(f"\n{'=' * 56}")
     print(f"{_ok} passed, {_fail} failed")

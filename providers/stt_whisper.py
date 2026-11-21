@@ -44,6 +44,7 @@ import os
 import time
 from importlib.util import find_spec
 from typing import Optional
+from urllib.parse import urlparse
 
 from . import audio
 from .base import DEFAULT_CAPS, Field
@@ -208,8 +209,8 @@ class WhisperSTT:
 
         base = _normalise(self.base_url)
         from core.ai_policy import validate_provider
-        entry = "groq" if (base.partition("://")[2].split("/", 1)[0].lower()
-                           == "api.groq.com") else "custom"
+        entry = ("groq" if (urlparse(base).hostname or "").lower()
+                 == "api.groq.com" else "custom")
         decision = validate_provider(
             f"whisper@{entry}",
             {"base_url": base, "model": self.model_name,

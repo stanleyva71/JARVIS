@@ -483,6 +483,24 @@ def get_pipeline() -> dict:
     return dict(val) if isinstance(val, dict) else {}
 
 
+def get_ai_router_alternatives() -> list[str]:
+    """Explicit fallback order for Pipeline LLM providers."""
+    val = get_providers().get("ai_router_alternatives")
+    if not isinstance(val, list):
+        return []
+    return [str(pid).strip() for pid in val if str(pid).strip()]
+
+
+def save_ai_router_alternatives(provider_ids: list[str] | tuple[str, ...]) -> None:
+    """Store an explicit, de-duplicated fallback order."""
+    out: list[str] = []
+    for provider_id in provider_ids or ():
+        pid = str(provider_id or "").strip()
+        if pid and pid not in out:
+            out.append(pid)
+    _patch_providers(ai_router_alternatives=out)
+
+
 def get_sidecar_provider() -> str:
     """The provider id used for one-shot calls when Gemini cannot answer them,
     or '' for none.
@@ -574,7 +592,8 @@ def save_sidecar_first(enabled: bool) -> None:
 
 def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
                    sidecar: str = None, sidecar_first: bool = None,
-                   coding: str = None) -> None:
+                   coding: str = None,
+                   ai_router_alternatives: list[str] | tuple[str, ...] = None) -> None:
     """Write the whole providers block in ONE file write.
 
     The settings panel used to call five setters in a row — one per provider's
@@ -624,6 +643,13 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
         block["sidecar_first"] = bool(sidecar_first)
     if coding is not None:
         block["coding"] = str(coding or "").strip()
+    if ai_router_alternatives is not None:
+        out: list[str] = []
+        for provider_id in ai_router_alternatives:
+            pid = str(provider_id or "").strip()
+            if pid and pid not in out:
+                out.append(pid)
+        block["ai_router_alternatives"] = out
 
     data["providers"] = block
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")

@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 from importlib.util import find_spec
 from typing import Any, AsyncIterator, Optional
+from urllib.parse import urlparse
 
 from .base import DEFAULT_CAPS, Field, FunctionCall
 
@@ -395,10 +396,10 @@ class OpenAICompatLLM:
 
     # -- headers ------------------------------------------------------------
     def _policy_id(self) -> str:
-        low = self.base.lower()
-        if "openrouter.ai" in low:
+        host = (urlparse(self.base).hostname or "").lower()
+        if host == "openrouter.ai":
             return "openai_compat@openrouter"
-        if "api.groq.com" in low:
+        if host == "api.groq.com":
             return "openai_compat@groq"
         return "openai_compat"
 

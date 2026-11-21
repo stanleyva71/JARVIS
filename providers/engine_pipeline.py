@@ -1172,14 +1172,21 @@ def _parse_prompt_call(text: str, known: set[str]) -> Optional[FunctionCall]:
 
 def _make(cfg: dict) -> PipelineEngine:
     """Built from the ids stored in the panel, resolved through the registry."""
-    from memory.config_manager import get_provider_config
+    from memory.config_manager import (get_ai_router_alternatives,
+                                       get_provider_config)
+    from core.ai_router import AIRouter
     from . import registry
 
     def part(slot: str):
         pid = str(cfg.get(slot) or "").strip()
         return registry.build(pid, get_provider_config(pid)) if pid else None
 
-    llm = part("llm")
+    llm_id = str(cfg.get("llm") or "").strip()
+    llm = AIRouter(
+        llm_id,
+        get_ai_router_alternatives(),
+        config_getter=get_provider_config,
+    ) if llm_id else None
     if llm is None:
         raise RuntimeError("the pipeline engine needs a language model")
     return PipelineEngine(llm, part("stt"), part("tts"),

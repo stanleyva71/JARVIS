@@ -2399,8 +2399,11 @@ class JarvisLive:
         if self._engine_mode() != "pipeline":
             return None
         try:
-            from memory.config_manager import get_pipeline, get_provider_config
+            from memory.config_manager import (get_ai_router_alternatives,
+                                               get_pipeline,
+                                               get_provider_config)
             from providers import registry
+            from core.ai_router import AIRouter
 
             pipe = get_pipeline()
             llm_id = str(pipe.get("llm") or "").strip()
@@ -2409,7 +2412,11 @@ class JarvisLive:
             missing = registry.missing_fields(llm_id, get_provider_config(llm_id))
             if missing:
                 raise RuntimeError(f"{llm_id} needs: {', '.join(missing)}")
-            llm = registry.build(llm_id, get_provider_config(llm_id))
+            llm = AIRouter(
+                llm_id,
+                get_ai_router_alternatives(),
+                config_getter=get_provider_config,
+            )
 
             # Ask the model whether it can see, once, and remember the answer.
             #
@@ -2464,9 +2471,12 @@ class JarvisLive:
                 yield session
             return
 
-        from memory.config_manager import get_pipeline, get_provider_config
+        from memory.config_manager import (get_ai_router_alternatives,
+                                           get_pipeline,
+                                           get_provider_config)
         from providers import registry
         from providers.engine_pipeline import PipelineEngine
+        from core.ai_router import AIRouter
 
         pipe = get_pipeline()
 
@@ -2481,7 +2491,13 @@ class JarvisLive:
             cfg["log"] = self.ui.write_log
             return registry.build(pid, cfg)
 
-        engine = PipelineEngine(part("llm"), part("stt"), part("tts"),
+        llm_id = str(pipe.get("llm") or "").strip()
+        llm = AIRouter(
+            llm_id,
+            get_ai_router_alternatives(),
+            config_getter=get_provider_config,
+        ) if llm_id else None
+        engine = PipelineEngine(llm, part("stt"), part("tts"),
                                 config=config, log=self.ui.write_log)
         # Without push-to-talk nothing else knows when a sentence ended, so the
         # engine finds it in the audio. With push-to-talk the key release is the

@@ -57,7 +57,7 @@ def _host_is_local(url: str) -> bool:
         return False
 
 
-def _is_official_https(url: str, hostname: str) -> bool:
+def _is_official_https(url: str, hostname: str, path: str) -> bool:
     parsed = urlparse(url)
     try:
         port = parsed.port
@@ -67,6 +67,11 @@ def _is_official_https(url: str, hostname: str) -> bool:
         parsed.scheme.lower() == "https"
         and (parsed.hostname or "").lower() == hostname
         and port in (None, 443)
+        and not parsed.username
+        and not parsed.password
+        and parsed.path.rstrip("/") == path
+        and not parsed.query
+        and not parsed.fragment
     )
 
 
@@ -145,7 +150,7 @@ def validate_provider(provider_id: str, cfg: dict,
         return PolicyDecision(raw_id, model, True, True)
 
     if entry == "openrouter":
-        if not _is_official_https(url, "openrouter.ai"):
+        if not _is_official_https(url, "openrouter.ai", "/api/v1"):
             raise PolicyViolation("OpenRouter requires the official HTTPS endpoint")
         if not model.endswith(":free"):
             raise PolicyViolation(
@@ -154,7 +159,7 @@ def validate_provider(provider_id: str, cfg: dict,
         return PolicyDecision(raw_id, model, False, True)
 
     if entry == "groq":
-        if not _is_official_https(url, "api.groq.com"):
+        if not _is_official_https(url, "api.groq.com", "/openai/v1"):
             raise PolicyViolation("Groq requires the official HTTPS endpoint")
         if model not in _GROQ_FREE_MODELS:
             raise PolicyViolation(
