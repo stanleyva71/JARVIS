@@ -50,7 +50,7 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
@@ -3386,6 +3386,29 @@ class ProvidersOverlay(_HudOverlay):
                 "Workers Free. The app cannot verify billing or guarantee that a "
                 "Paid account or credits will not generate charges.",
                 7, C.ACC))
+            confirm = QCheckBox(
+                "I confirmed this account is on Workers Free "
+                "(I understand JARVIS cannot verify it)"
+            )
+            confirm.setChecked(
+                str(stored.get("cloudflare_plan") or "").strip().lower()
+                == "free-confirmed"
+            )
+            confirm.setStyleSheet(
+                f"QCheckBox {{ color: {C.TEXT}; background: transparent; }}"
+                f"QCheckBox::indicator {{ width: 14px; height: 14px; }}"
+            )
+
+            def persist_confirmation(_checked, _pid=pid):
+                from memory.config_manager import save_provider_config
+                save_provider_config(
+                    _pid,
+                    {"cloudflare_plan":
+                     "free-confirmed" if confirm.isChecked() else "unknown"},
+                )
+
+            confirm.stateChanged.connect(persist_confirmation)
+            lay.addWidget(confirm)
         is_local = entry.get("local") is True
         entry_values = entry.get("values") or {}
         # An entry that MENTIONS the address has answered it — including
@@ -3452,6 +3475,8 @@ class ProvidersOverlay(_HudOverlay):
 
         fields = dict(shown)
         fields.update(carried)
+        if eid == "cloudflare":
+            fields["cloudflare_plan"] = (confirm, None)
         self._hidden[pid] = set(carried) | {f.key for f, _w in advanced}
 
         # Buttons and status.
@@ -3769,7 +3794,9 @@ class ProvidersOverlay(_HudOverlay):
         hidden = self._hidden.get(pid, set())
         stored = self._get_cfg(pid)
         for key, (w, _f) in self._edits.get(pid, {}).items():
-            if isinstance(w, QComboBox):
+            if isinstance(w, QCheckBox):
+                value = "free-confirmed" if w.isChecked() else "unknown"
+            elif isinstance(w, QComboBox):
                 value = (w.currentText().strip() if w.isEditable()
                          else (w.currentData() or ""))
             else:

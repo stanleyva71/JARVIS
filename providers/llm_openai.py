@@ -766,10 +766,6 @@ PROVIDER = {
         Field("account_id", "Cloudflare Account ID", kind="text", required=False,
               advanced=False,
               hint="32 hexadecimal characters; used only for the official Cloudflare endpoint"),
-        Field("cloudflare_plan", "Workers plan", kind="choice",
-              choices=("unknown", "free-confirmed"),
-              default="unknown", required=False,
-              hint="Choose free-confirmed only after confirming this account is on Workers Free"),
         Field("api_key", "API key", kind="secret", required=False,
               hint="Local servers usually need none"),
         # Filled in by TEST, not asked. The user is the wrong person to ask

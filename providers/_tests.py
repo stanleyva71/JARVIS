@@ -687,6 +687,63 @@ def test_ai_policy_and_errors():
                    "account_id": account_id,
                    "cloudflare_plan": "free-confirmed",
                    "model": "@cf/openai/gpt-4o-unknown"}))
+    from providers.llm_openai import OpenAICompatLLM
+    cf_cfg = {
+        "base_url": f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+        "account_id": account_id,
+        "cloudflare_plan": "unknown",
+        "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "api_key": "CF_SECRET",
+    }
+    http_calls = []
+    class NoHTTP:
+        class Client:
+            def __init__(self, *args, **kwargs):
+                http_calls.append("client")
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def post(self, *args, **kwargs):
+                http_calls.append("post")
+                raise AssertionError("blocked Cloudflare request reached HTTP")
+    unconfirmed_cf = OpenAICompatLLM(cf_cfg)
+    unconfirmed_cf._httpx = NoHTTP
+    check("Cloudflare absent confirmation never creates HTTP request",
+          blocked_call(unconfirmed_cf.complete,
+                       [{"role": "user", "content": "hi"}]))
+    check("Cloudflare absent confirmation sends zero HTTP calls",
+          http_calls == [])
+    cf_cfg["cloudflare_plan"] = "free-confirmed"
+    confirmed_cf = OpenAICompatLLM(cf_cfg)
+    class MockResponse:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+    class MockHTTP:
+        class Client:
+            def __init__(self, *args, **kwargs):
+                http_calls.append("mock-client")
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def post(self, *args, **kwargs):
+                http_calls.append("mock-post")
+                return MockResponse()
+    confirmed_cf._httpx = MockHTTP
+    confirmed_text, _ = confirmed_cf.complete(
+        [{"role": "user", "content": "hi"}],
+    )
+    check("Cloudflare confirmed valid account passes HTTP policy",
+          confirmed_text == "ok" and http_calls[-1] == "mock-post")
+    confirmed_cf.cloudflare_plan = "unknown"
+    before_withdraw = list(http_calls)
+    check("Removing Cloudflare confirmation blocks HTTP",
+          blocked_call(confirmed_cf.complete,
+                       [{"role": "user", "content": "hi"}])
+          and http_calls == before_withdraw)
     check("Groq approved free model is allowed",
           validate_provider(
               "openai_compat@groq",
@@ -1568,7 +1625,7 @@ def test_panel_settings_survive():
 
     section("[10] The settings panel remembers")
     try:
-        from PyQt6.QtWidgets import QApplication, QComboBox
+        from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox
     except Exception as e:
         check("PyQt6 available", False, str(e))
         return
@@ -1612,6 +1669,47 @@ def test_panel_settings_survive():
                   get_provider_config(OLLAMA).get("base_url", "")
                   .endswith("11434/v1"),
                   str(get_provider_config(OLLAMA)))
+
+        CLOUDFLARE = "openai_compat@cloudflare"
+        save_provider_config(CLOUDFLARE, {
+            "cloudflare_plan": "unknown",
+            "account_id": "0123456789abcdef0123456789abcdef",
+        })
+        cf_index = ov._sidecar_combo.findData(CLOUDFLARE)
+        check("Cloudflare is offered in the provider panel",
+              cf_index > 0)
+        if cf_index > 0:
+            ov._sidecar_combo.setCurrentIndex(cf_index)
+            ov._sidecar_changed(cf_index)
+            ov._rebuild_body()
+            cf_checkboxes = ov.findChildren(QCheckBox)
+            cf_confirm = next(
+                (c for c in cf_checkboxes
+                 if "Workers Free" in c.text()),
+                None,
+            )
+            check("Cloudflare confirmation starts unchecked",
+                  cf_confirm is not None and not cf_confirm.isChecked())
+            if cf_confirm is not None:
+                cf_confirm.setChecked(True)
+                ov._remember_edits()
+                check("Cloudflare confirmation persists",
+                      get_provider_config(CLOUDFLARE).get("cloudflare_plan")
+                      == "free-confirmed")
+                ov._rebuild_body()
+                reopened_confirm = next(
+                    (c for c in ov.findChildren(QCheckBox)
+                     if "Workers Free" in c.text()),
+                    None,
+                )
+                check("Cloudflare confirmation survives redraw",
+                      reopened_confirm is not None
+                      and reopened_confirm.isChecked())
+                reopened_confirm.setChecked(False)
+                ov._remember_edits()
+                check("Removing confirmation blocks Cloudflare again",
+                      get_provider_config(CLOUDFLARE).get("cloudflare_plan")
+                      != "free-confirmed")
 
         # -- typing survives a redraw ----------------------------------------
         if OLLAMA in ov._edits:
