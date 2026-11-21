@@ -1296,6 +1296,7 @@ class JarvisLive:
                 sliding_window=types.SlidingWindow(),
             ),
             speech_config=types.SpeechConfig(
+                language_code="pt-BR",
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=get_voice()

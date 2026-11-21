@@ -1769,6 +1769,72 @@ def test_voices_follow_the_language():
           not _accepts_language(SystemTTS({})))
 
 
+def test_leda_voice_availability_and_persistence():
+    """Leda is offered in customization and is persisted only after selection."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    section("[11] Leda voice availability and persistence")
+    from memory.config_manager import (
+        AVAILABLE_VOICES,
+        CONFIG_FILE,
+        get_voice,
+        save_voice,
+    )
+
+    original = CONFIG_FILE.read_text(encoding="utf-8") if CONFIG_FILE.exists() else None
+    try:
+        for preserved in ("Charon", "Puck", "Kore", "Fenrir", "Aoede"):
+            check(f"{preserved} remains available",
+                  preserved in AVAILABLE_VOICES)
+        check("Leda is available",
+              "Leda" in AVAILABLE_VOICES)
+
+        save_voice("Puck")
+        check("an existing voice is kept until changed",
+              get_voice() == "Puck")
+
+        try:
+            from PyQt6.QtWidgets import QApplication
+            import ui as UI
+        except Exception as e:
+            check("Leda customization UI available", False, str(e))
+            return
+
+        app = QApplication.instance() or QApplication([])
+        overlay = UI.CustomizeOverlay(
+            assistant_name="JARVIS",
+            user_name="",
+            ui_color=UI.DEFAULT_UI_COLOR,
+            voice=get_voice(),
+        )
+        check("Leda appears in customization",
+              "Leda" in overlay._voice_btns)
+        check("Puck remains selected automatically",
+              overlay._sel_voice == "Puck"
+              and overlay._voice_btns["Puck"].isChecked())
+
+        overlay._on_voice_pick("Leda")
+        check("choosing Leda does not persist before Apply",
+              overlay._sel_voice == "Leda"
+              and get_voice() == "Puck")
+
+        save_voice("Leda")
+        check("Leda persists after selection",
+              get_voice() == "Leda")
+
+        main_source = (Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8")
+        check("Gemini Live uses Brazilian Portuguese",
+              'language_code="pt-BR"' in main_source)
+    finally:
+        if original is None:
+            if CONFIG_FILE.exists():
+                CONFIG_FILE.unlink()
+        else:
+            CONFIG_FILE.write_text(original, encoding="utf-8")
+
+
 def test_panel_settings_survive():
     """The settings panel: does what you choose come back?
 
@@ -2078,6 +2144,7 @@ async def main() -> int:
     test_reasoning_is_not_read_aloud()
     test_local_models_get_a_smaller_prompt()
     test_voices_follow_the_language()
+    test_leda_voice_availability_and_persistence()
     test_voice_folder_is_writable()
     test_a_chosen_voice_downloads_itself()
     test_panel_settings_survive()
