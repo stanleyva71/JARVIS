@@ -437,7 +437,6 @@ _metrics = _SysMetrics()
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(300, 300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -469,6 +468,7 @@ class HudCanvas(QWidget):
         self._chloe_error = ""
         self._chloe_initializing = False
         self._chloe_init_timer = None
+        self._chloe_expanded_logged = False
 
         self._requested_hud_style = self.hud_style
         if self.hud_style == "chloe" and not self._ensure_chloe():
@@ -543,9 +543,11 @@ class HudCanvas(QWidget):
 
         if self._chloe_ready:
             self._position_chloe()
-            self._chloe.raise_()
             if not self._chloe.isVisible():
                 self._chloe.show()
+            rect = self._chloe.geometry()
+            if rect.width() > 1 and rect.height() > 1 and not self._chloe_expanded_logged:
+                self._chloe_expanded_logged = True
                 print("[Chloe] Widget expandido e exibido.", flush=True)
         else:
             # Never hide the initialization surface. At 1x1 it only creates the
@@ -585,12 +587,14 @@ class HudCanvas(QWidget):
         sy_status = cy + fw * 0.40
         band_t = 12.0
         band_h = max(60.0, sy_status - 12.0 - band_t)
-        self._chloe.setGeometry(
+        rect = QRect(
             int(max(0.0, cx - fw * 0.38)),
             int(band_t),
             int(min(W, fw * 0.76)),
             int(band_h),
         )
+        if self._chloe.geometry() != rect:
+            self._chloe.setGeometry(rect)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -604,17 +608,6 @@ class HudCanvas(QWidget):
             self._clear_chloe_init_timeout()
             if self._requested_hud_style == "chloe":
                 self.hud_style = "chloe"
-                self._position_chloe()
-                if self._chloe is not None:
-                    self._chloe.set_active(True)
-                    self._chloe.raise_()
-                    self._chloe.show()
-                    rect = self._chloe.geometry()
-                    print(
-                        f"[Chloe] Widget expandido e exibido "
-                        f"({rect.width()}x{rect.height()} em {rect.x()},{rect.y()}).",
-                        flush=True,
-                    )
             elif self._chloe is not None:
                 self._chloe.hide()
             self.update()
@@ -766,8 +759,9 @@ class HudCanvas(QWidget):
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
 
-        if self.hud_style == "chloe" and self._ensure_chloe():
-            pass
+        if self.hud_style == "chloe":
+            self._ensure_chloe()
+            return
         elif self._avatar is not None and self.hud_style == "face":
             self._avatar.step(dt, amp, speaking=self.speaking,
                               muted=self.muted, state=self.state,
@@ -825,15 +819,18 @@ class HudCanvas(QWidget):
             # to sit running all day. The animation state above keeps stepping,
             # so it picks up mid-motion instead of snapping when you come back.
             if self._on_screen():
-                self.update()
                 if (self.hud_style == "chloe" and self._chloe_ready
                         and self._chloe is not None):
                     self._chloe.set_active(True)
-                    self._chloe.update()
+                else:
+                    self.update()
         if self._chloe is not None:
-            self._chloe.set_active(self.hud_style == "chloe"
-                                   and self._chloe_ready
-                                   and self._on_screen())
+            if not self._chloe_ready:
+                # The first initialization must keep Qt updates enabled.
+                self._chloe.set_active(True)
+            else:
+                self._chloe.set_active(self.hud_style == "chloe"
+                                       and self._on_screen())
 
     def _on_screen(self) -> bool:
         """True only when this canvas can actually be seen by the user."""
@@ -1034,7 +1031,7 @@ class HudCanvas(QWidget):
         # fullscreen — without ever colliding with the status text below.
         _sy_status = cy + fw * 0.40
         if self.hud_style == "chloe" and self._chloe_ready and self._chloe is not None:
-            self._chloe.raise_()
+            pass
         elif self.hud_style == "face" or (
                 self.hud_style == "chloe"
                 and (self._chloe_initializing or not self._chloe_ready)

@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtGui import QSurfaceFormat
 
@@ -144,6 +144,9 @@ class ChloeGLWidget(QOpenGLWidget):
         self._start_time = time.monotonic()
         self._duration = 0.0
         self._animation = None
+        self._first_paint_logged = False
+        self._paint_gl_logged = False
+        self._ready_signal_sent = False
         self._node_matrices = []
         self._inverse_bind = []
         self._joints = []
@@ -158,13 +161,24 @@ class ChloeGLWidget(QOpenGLWidget):
         return self._ready
 
     def set_active(self, active: bool) -> None:
-        if active != self._active:
-            self._active = active
-            if active:
+        """Keep initialization updates alive until the GL model is ready.
+
+        Before ready=True, updates must remain enabled so Qt can reach
+        initializeGL() and paintGL(). Once ready, updates may be paused for
+        a hidden/minimized widget or after a style change.
+        """
+        wanted_active = bool(active)
+        if not self._ready:
+            wanted_active = True
+
+        if wanted_active != self._active:
+            self._active = wanted_active
+            if wanted_active:
                 self._start_time = time.monotonic()
-        self.setUpdatesEnabled(active)
-        if active:
-            self.update()
+
+        # Idempotent: do not repeatedly disable or re-enable Qt updates.
+        if self.isUpdatesEnabled() != wanted_active:
+            self.setUpdatesEnabled(wanted_active)
 
     def resizeGL(self, width: int, height: int):
         if GL is None:
@@ -186,6 +200,13 @@ class ChloeGLWidget(QOpenGLWidget):
             if context is None or not context.isValid():
                 raise RuntimeError("Qt OpenGL context is not valid")
             print("[Chloe] Contexto OpenGL válido.", flush=True)
+            # A QOpenGLWidget may initialize more than once after resize/context
+            # recreation. Never reuse VAO/texture IDs from a previous context.
+            self._primitives = []
+            self._textures = {}
+            self._program = None
+            self._ready = False
+            self._first_paint_logged = False
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
             GL.glClearColor(0.0, 0.023529, 0.039216, 1.0)
             GL.glViewport(0, 0, self.width(), self.height())
@@ -198,7 +219,6 @@ class ChloeGLWidget(QOpenGLWidget):
             self._upload_primitives()
             self._ready = True
             print("[Chloe] Renderização pronta.", flush=True)
-            self.ready_changed.emit(True, "")
         except Exception as exc:
             self._fail(f"Could not render Chloe: {exc}")
 
@@ -207,7 +227,7 @@ class ChloeGLWidget(QOpenGLWidget):
         self._ready = False
         print(f"[Chloe] {message}", flush=True)
         traceback.print_exc()
-        self.ready_changed.emit(False, message)
+        QTimer.singleShot(0, lambda: self.ready_changed.emit(False, message))
 
     def paintGL(self):
         if GL is None:
@@ -216,6 +236,9 @@ class ChloeGLWidget(QOpenGLWidget):
             context = self.context()
             if context is None or not context.isValid():
                 raise RuntimeError("Qt OpenGL context was lost")
+            if not self._paint_gl_logged:
+                self._paint_gl_logged = True
+                print("[Chloe] paintGL() executado.", flush=True)
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
             ratio = getattr(self, "devicePixelRatioF", lambda: 1.0)()
             GL.glViewport(0, 0, int(self.width() * ratio), int(self.height() * ratio))
@@ -225,6 +248,13 @@ class ChloeGLWidget(QOpenGLWidget):
             GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
             self._animate()
             self._draw()
+            if not self._first_paint_logged:
+                self._first_paint_logged = True
+                print("[Chloe] Primeiro frame da Chloe desenhado.", flush=True)
+            if not self._ready_signal_sent:
+                self._ready_signal_sent = True
+                print("[Chloe] ready=True emitido.", flush=True)
+                QTimer.singleShot(100, lambda: self.ready_changed.emit(True, ""))
         except Exception as exc:
             self._fail(f"Chloe render stopped: {exc}")
 
@@ -441,6 +471,7 @@ class ChloeGLWidget(QOpenGLWidget):
         return shader
 
     def _upload_textures(self):
+        texture_count = 0
         for i, texture in enumerate(self._gltf.textures or []):
             if texture.source is None:
                 continue
@@ -475,8 +506,11 @@ class ChloeGLWidget(QOpenGLWidget):
                             GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, pixels)
             GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
             self._textures[i] = tex
+            texture_count += 1
+        print(f"[Chloe] Texturas carregadas: {texture_count}.", flush=True)
 
     def _upload_primitives(self):
+        primitive_count = 0
         for node_index, node in enumerate(self._gltf.nodes or []):
             if node.mesh is None:
                 continue
@@ -528,6 +562,8 @@ class ChloeGLWidget(QOpenGLWidget):
                     "texture": tex_index, "base": base,
                 })
                 GL.glBindVertexArray(0)
+                primitive_count += 1
+        print(f"[Chloe] Malhas carregadas: {primitive_count} primitiva(s).", flush=True)
 
     def _draw(self):
         w, h = max(1, self.width()), max(1, self.height())
