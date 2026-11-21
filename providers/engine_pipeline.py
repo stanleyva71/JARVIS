@@ -1189,6 +1189,7 @@ def _make(cfg: dict) -> PipelineEngine:
     ) if llm_id else None
     if llm is None:
         raise RuntimeError("the pipeline engine needs a language model")
+    llm.ensure_vision_known()
     return PipelineEngine(llm, part("stt"), part("tts"),
                           config=cfg.get("live_config"), log=cfg.get("log"))
 

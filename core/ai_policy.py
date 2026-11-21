@@ -112,9 +112,19 @@ def validate_provider(provider_id: str, cfg: dict,
         return PolicyDecision(raw_id, model, True, True)
 
     if base != "openai_compat":
-        if base == "whisper" and entry == "groq" and model in {
-            "whisper-large-v3-turbo", "whisper-large-v3"
-        }:
+        if base == "whisper" and entry == "groq":
+            if not _is_official_https(url, "api.groq.com", "/openai/v1"):
+                raise PolicyViolation(
+                    "Groq Whisper requires the official HTTPS endpoint "
+                    "/openai/v1"
+                )
+            if model not in {
+                "whisper-large-v3-turbo",
+                "whisper-large-v3",
+            }:
+                raise PolicyViolation(
+                    "Groq Whisper is restricted to approved free-tier models"
+                )
             return PolicyDecision(raw_id, model, False, True)
         raise PolicyViolation(
             f"paid or cost-unknown provider is blocked: {raw_id}"

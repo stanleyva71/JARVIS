@@ -2497,6 +2497,11 @@ class JarvisLive:
             get_ai_router_alternatives(),
             config_getter=get_provider_config,
         ) if llm_id else None
+        if llm is not None:
+            from memory.config_manager import save_provider_config
+            llm.ensure_vision_known(
+                lambda v, _id=llm_id: save_provider_config(_id, v)
+            )
         engine = PipelineEngine(llm, part("stt"), part("tts"),
                                 config=config, log=self.ui.write_log)
         # Without push-to-talk nothing else knows when a sentence ended, so the

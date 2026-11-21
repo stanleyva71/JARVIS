@@ -27,8 +27,14 @@ class AIRouter:
         self._cooldown: dict[str, float] = {}
         self._last: Any = None
         self._partial = False
-        self._build_caps = {}
         self.caps = {}
+        self.caps.update({
+            "tools": False,
+            "tool_format": None,
+            "vision": False,
+            "max_tools": None,
+            "max_tool_chars": None,
+        })
 
     def _ids(self) -> list[str]:
         ids: list[str] = []
@@ -85,15 +91,64 @@ class AIRouter:
     def _fallback_allowed(self, info) -> bool:
         return info.recoverable and not self._partial
 
+    @staticmethod
+    def _requires_vision(messages: list[dict]) -> bool:
+        for message in messages or []:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    kind = str(part.get("type") or "").lower()
+                    if kind in {"image", "image_url", "input_image"}:
+                        return True
+                    if "image_url" in part:
+                        return True
+            elif isinstance(content, dict):
+                kind = str(content.get("type") or "").lower()
+                if kind in {"image", "image_url", "input_image"}:
+                    return True
+        return False
+
+    def _provider_caps(self, provider: Any) -> dict:
+        return dict(getattr(provider, "caps", {}) or {})
+
+    def _compatible(self, provider: Any, *,
+                    requires_tools: bool,
+                    requires_vision: bool) -> bool:
+        caps = self._provider_caps(provider)
+        if requires_tools and (
+            not caps.get("tools")
+            or not caps.get("tool_format")
+        ):
+            return False
+        if requires_vision and not caps.get("vision"):
+            return False
+        return True
+
+    def _copy_primary_caps(self, provider: Any) -> dict:
+        caps = dict(self.caps)
+        caps.update(self._provider_caps(provider))
+        self.caps = caps
+        self._last = provider
+        return caps
+
     def ensure_vision_known(self, save=None) -> bool:
         provider_id = self.primary_id
         try:
             provider = self._build(provider_id)
+            self._copy_primary_caps(provider)
             check = getattr(provider, "ensure_vision_known", None)
             if check is None:
-                return bool(getattr(provider, "caps", {}).get("vision"))
-            return bool(check(save))
+                seen = bool(self._provider_caps(provider).get("vision"))
+            else:
+                seen = bool(check(save))
+            self.caps["vision"] = seen
+            provider.caps = dict(self._provider_caps(provider))
+            provider.caps["vision"] = seen
+            return seen
         except Exception:
+            self.caps["vision"] = False
             return False
 
     async def chat(
@@ -106,6 +161,8 @@ class AIRouter:
     ) -> AsyncIterator[dict]:
         self._partial = False
         attempted: set[str] = set()
+        requires_tools = bool(tools)
+        requires_vision = self._requires_vision(messages)
 
         for provider_id in self._ids():
             if provider_id in attempted or self._cooling(provider_id):
@@ -114,8 +171,17 @@ class AIRouter:
 
             try:
                 provider = self._build(provider_id)
-                self._last = provider
-                self.caps = dict(getattr(provider, "caps", {}) or {})
+                if provider_id != self.primary_id and not self._compatible(
+                    provider,
+                    requires_tools=requires_tools,
+                    requires_vision=requires_vision,
+                ):
+                    continue
+                self._copy_primary_caps(provider)
+                if provider_id == self.primary_id:
+                    # The primary may have cached vision/tool capabilities that
+                    # changed after ensure_vision_known().
+                    self.caps.update(self._provider_caps(provider))
                 async for event in provider.chat(
                     messages,
                     tools,
@@ -147,14 +213,23 @@ class AIRouter:
         temperature: float | None = None,
     ) -> tuple[str, list]:
         attempted: set[str] = set()
+        requires_tools = bool(tools)
+        requires_vision = self._requires_vision(messages)
         for provider_id in self._ids():
             if provider_id in attempted or self._cooling(provider_id):
                 continue
             attempted.add(provider_id)
             try:
                 provider = self._build(provider_id)
-                self._last = provider
-                self.caps = dict(getattr(provider, "caps", {}) or {})
+                if provider_id != self.primary_id and not self._compatible(
+                    provider,
+                    requires_tools=requires_tools,
+                    requires_vision=requires_vision,
+                ):
+                    continue
+                self._copy_primary_caps(provider)
+                if provider_id == self.primary_id:
+                    self.caps.update(self._provider_caps(provider))
                 return provider.complete(
                     messages,
                     tools,

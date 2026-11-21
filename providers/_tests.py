@@ -663,6 +663,32 @@ def test_ai_policy_and_errors():
           blocked("openai_compat@groq",
                   {"base_url": "https://api.groq.com:8443/openai/v1",
                    "model": "llama-3.1-8b-instant"}))
+    check("Groq Whisper official endpoint is allowed",
+          validate_provider(
+              "whisper@groq",
+              {"base_url": "https://api.groq.com/openai/v1",
+               "model": "whisper-large-v3-turbo",
+               "backend": "api"},
+              declaration={
+                  "catalog": (
+                      {"id": "groq", "local": False},
+                  )
+              },
+          ).free_only)
+    for bad_url in (
+        "http://api.groq.com/openai/v1",
+        "https://api.groq.com.evil.test/openai/v1",
+        "https://api.groq.com/openai/v1/extra",
+        "https://api.groq.com:8443/openai/v1",
+        "https://user:pass@api.groq.com/openai/v1",
+        "https://api.groq.com/openai/v1?key=leak",
+        "https://api.groq.com/openai/v1#fragment",
+    ):
+        check(f"Groq Whisper endpoint blocked: {bad_url}",
+              blocked("whisper@groq",
+                      {"base_url": bad_url,
+                       "model": "whisper-large-v3-turbo",
+                       "backend": "api"}))
     check("remote local endpoint is blocked",
           blocked("openai_compat@ollama",
                   {"base_url": "http://192.168.1.50:11434/v1",
@@ -781,10 +807,11 @@ async def test_ai_router_fallback():
     ollama = "openai_compat@ollama"
     openrouter = "openai_compat@openrouter"
 
-    def collect(router):
+    def collect(router, *, tools=None, messages=None):
         async def run():
             events = []
-            async for event in router.chat([{"role": "user", "content": "hi"}]):
+            chosen = messages or [{"role": "user", "content": "hi"}]
+            async for event in router.chat(chosen, tools=tools):
                 events.append(event)
             return events
         return run()
@@ -895,6 +922,86 @@ async def test_ai_router_fallback():
         all_failed = True
     check("all providers fail safely without fallback on authentication",
           all_failed and calls == [primary])
+
+    calls.clear()
+
+    class ToolVisionLLM(FakeLLM):
+        caps = {"tools": True, "tool_format": "openai",
+                "vision": True, "max_tools": 14}
+
+        def ensure_vision_known(self, save=None):
+            self.caps = dict(self.caps)
+            self.caps["vision"] = True
+            if save:
+                save({"vision": "1", "vision_model": "test-model"})
+            return True
+
+    class TextOnlyLLM(FakeLLM):
+        caps = {"tools": False, "tool_format": None,
+                "vision": False, "max_tools": None}
+
+    vision_router = AIRouter(
+        "openai_compat@ollama",
+        ("openai_compat@groq",),
+        config_getter=config_getter,
+        builder=lambda pid, cfg: (
+            ToolVisionLLM(pid, [{"text": "vision answer"}])
+            if pid == "openai_compat@ollama"
+            else TextOnlyLLM(pid, [{"text": "text fallback"}])
+        ),
+    )
+    saved = {}
+    seen = vision_router.ensure_vision_known(saved.update)
+    vision_events = await collect(vision_router)
+    check("tool and vision capabilities are preserved",
+          seen
+          and vision_router.caps.get("tools") is True
+          and vision_router.caps.get("vision") is True
+          and vision_events == [{"text": "vision answer"}])
+
+    calls.clear()
+    incompatible_router = AIRouter(
+        "openai_compat@ollama",
+        ("openai_compat@groq",),
+        config_getter=config_getter,
+        builder=lambda pid, cfg: (
+            ToolVisionLLM(pid, [], RuntimeError("timeout"))
+            if pid == "openai_compat@ollama"
+            else TextOnlyLLM(pid, [{"text": "should not run"}])
+        ),
+    )
+    try:
+        await collect(incompatible_router, tools=[{"type": "function"}])
+        incompatible_failed = False
+    except RuntimeError:
+        incompatible_failed = True
+    check("fallback incompatible with required tools is blocked",
+          incompatible_failed and calls == ["openai_compat@ollama"])
+
+    calls.clear()
+    vision_fallback = AIRouter(
+        "openai_compat@ollama",
+        ("openai_compat@groq",),
+        config_getter=config_getter,
+        builder=lambda pid, cfg: (
+            ToolVisionLLM(pid, [], RuntimeError("timeout"))
+            if pid == "openai_compat@ollama"
+            else TextOnlyLLM(pid, [{"text": "should not run"}])
+        ),
+    )
+    vision_message = [{
+        "role": "user",
+        "content": [{"type": "image_url",
+                     "image_url": {"url": "data:image/png;base64,AAA"}}],
+    }]
+    try:
+        await collect(vision_fallback, messages=vision_message)
+        vision_fallback_failed = False
+    except RuntimeError:
+        vision_fallback_failed = True
+    check("fallback incompatible with required vision is blocked",
+          vision_fallback_failed
+          and calls == ["openai_compat@ollama"])
 
 
 def test_costs_nothing_when_unused():
