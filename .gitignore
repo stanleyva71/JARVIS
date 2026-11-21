@@ -49,3 +49,6 @@ desktop.ini
 logs/
 downloads/
 screenshots/
+
+# ── Private 3D character assets (never publish the Chloe GLB) ───────────────
+assets/private/*.glb

@@ -130,19 +130,21 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
-HUD_STYLES = ("face", "core")
+HUD_STYLES = ("face", "core", "chloe")
 
 
 def get_hud_style() -> str:
-    """Which centrepiece the HUD draws: the animated head, or the reactor core.
+    """Which centrepiece the HUD draws: face, core or optional Chloe 3D."""
+    data = load_api_keys()
+    if "hud_style" in data:
+        v = str(data.get("hud_style", "face")).strip().lower()
+        return v if v in HUD_STYLES else "face"
 
-    Taste, not capability — both render in the same software painter and cost
-    about the same. Defaults to the head because that is what MARK LIV shipped
-    with; anyone who preferred the older look can switch back in ⚙ and the
-    choice survives a restart.
-    """
-    v = str(load_api_keys().get("hud_style", "face")).strip().lower()
-    return v if v in HUD_STYLES else "face"
+    private = BASE_DIR / "assets" / "private"
+    if ((private / "chloe.glb").is_file()
+            or (private / "chloe_-_detroit_become_human.glb").is_file()):
+        return "chloe"
+    return "face"
 
 
 def save_hud_style(style: str) -> None:

@@ -63,6 +63,12 @@ try:
 except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
 
+try:
+    from core.chloe_gl import ChloeGLWidget
+except Exception as _chloe_import_error:
+    ChloeGLWidget = None
+    print(f"[Chloe] 3D renderer unavailable ({_chloe_import_error})")
+
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -457,6 +463,20 @@ class HudCanvas(QWidget):
             self.hud_style = get_hud_style()
         except Exception:
             self.hud_style = "face"
+
+        self._chloe = None
+        self._chloe_ready = False
+        self._chloe_error = ""
+
+        self._requested_hud_style = self.hud_style
+        if self.hud_style == "chloe" and not self._ensure_chloe():
+            self.hud_style = "face" if self._avatar is not None else "core"
+            self._requested_hud_style = self.hud_style
+            try:
+                from memory.config_manager import save_hud_style
+                save_hud_style(self.hud_style)
+            except Exception:
+                pass
         self._core_phase = 0.0
 
         self._tick       = 0
@@ -501,6 +521,82 @@ class HudCanvas(QWidget):
                 self._avatar.glance(dx, dy, hold)
         except Exception:
             pass
+
+    def _ensure_chloe(self) -> bool:
+        """Create the OpenGL context only when Chloe is explicitly selected."""
+        if ChloeGLWidget is None:
+            self._chloe_error = "The Chloe 3D renderer is unavailable"
+            return False
+        if self._chloe is None:
+            try:
+                self._chloe = ChloeGLWidget(BASE_DIR, self)
+                self._chloe.ready_changed.connect(self._on_chloe_ready)
+                self._chloe.hide()
+            except Exception as exc:
+                self._chloe = None
+                self._chloe_error = str(exc)
+                print(f"[Chloe] Could not create 3D widget: {exc}", flush=True)
+                return False
+        if not self._chloe.isVisible():
+            # Start at a 1-pixel viewport so native OpenGL cannot paint a
+            # large black surface over the HUD while initializeGL is running.
+            self._chloe.setGeometry(0, 0, 1, 1)
+            self._chloe.hide()
+            self._chloe.show()
+            QTimer.singleShot(8000, self._chloe_ready_timeout)
+        return True
+
+    def _position_chloe(self) -> None:
+        if self._chloe is None:
+            return
+        W, H = self.width(), self.height()
+        fw = min(W, H)
+        cx = W / 2
+        cy = H / 2
+        sy_status = cy + fw * 0.40
+        band_t = 12.0
+        band_h = max(60.0, sy_status - 12.0 - band_t)
+        self._chloe.setGeometry(
+            int(max(0.0, cx - fw * 0.38)),
+            int(band_t),
+            int(min(W, fw * 0.76)),
+            int(band_h),
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_chloe()
+
+    def _on_chloe_ready(self, ready: bool, error: str) -> None:
+        self._chloe_ready = ready
+        self._chloe_error = error
+        if ready:
+            if self._requested_hud_style == "chloe":
+                self.hud_style = "chloe"
+                self._position_chloe()
+                if self._chloe is not None:
+                    self._chloe.raise_()
+                    self._chloe.show()
+            self.update()
+            return
+        print(f"[Chloe] Falling back from Chloe 3D: {error}", flush=True)
+        if self._requested_hud_style == "chloe":
+            self.hud_style = "face" if self._avatar is not None else "core"
+            try:
+                from memory.config_manager import save_hud_style
+                save_hud_style(self.hud_style)
+            except Exception:
+                pass
+            if self._chloe is not None:
+                self._chloe.hide()
+            self.update()
+
+    def _chloe_ready_timeout(self) -> None:
+        if self._requested_hud_style == "chloe" and not self._chloe_ready:
+            self._on_chloe_ready(
+                False,
+                "OpenGL Chloe did not finish initialization within 8 seconds",
+            )
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
         """Thread-safe: hand over a schedule of (level, openness, width) frames.
@@ -632,13 +728,17 @@ class HudCanvas(QWidget):
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
 
-        if self._avatar is not None and self.hud_style == "face":
+        if self.hud_style == "chloe" and self._ensure_chloe():
+            pass
+        elif self._avatar is not None and self.hud_style == "face":
+            if self._chloe is not None:
+                self._chloe.hide()
             self._avatar.step(dt, amp, speaking=self.speaking,
                               muted=self.muted, state=self.state,
                               v_open=v_open, v_wide=v_wide or 0.0,
                               v_level=v_level, v_seq=v_seq,
                               v_hop=(sched[2] if sched is not None else 0.02))
-        else:
+        elif self.hud_style != "chloe":
             # Fallback core: slow "breathing" base target, lifted by the level.
             if now - self._last_t > (0.12 if self.speaking else 0.5):
                 if self.speaking:
@@ -690,6 +790,14 @@ class HudCanvas(QWidget):
             # so it picks up mid-motion instead of snapping when you come back.
             if self._on_screen():
                 self.update()
+                if (self.hud_style == "chloe" and self._chloe_ready
+                        and self._chloe is not None):
+                    self._chloe.set_active(True)
+                    self._chloe.update()
+        if self._chloe is not None:
+            self._chloe.set_active(self.hud_style == "chloe"
+                                   and self._chloe_ready
+                                   and self._on_screen())
 
     def _on_screen(self) -> bool:
         """True only when this canvas can actually be seen by the user."""
@@ -889,7 +997,9 @@ class HudCanvas(QWidget):
         # capped by width, so it fills the HUD at any window size — including
         # fullscreen — without ever colliding with the status text below.
         _sy_status = cy + fw * 0.40
-        if self._avatar is not None and self.hud_style == "face":
+        if self.hud_style == "chloe" and self._chloe_ready and self._chloe is not None:
+            self._chloe.raise_()
+        elif self._avatar is not None and self.hud_style == "face":
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
             _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08))
@@ -914,6 +1024,8 @@ class HudCanvas(QWidget):
         # was unreachable (no such file ships) and the bare orb it fell through
         # to is what this replaces.
         else:
+            if self._chloe is not None:
+                self._chloe.hide()
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
             _r = min(W * 0.46, _band_h / 2.0)
@@ -7014,39 +7126,52 @@ class MainWindow(QMainWindow):
 
     def _refresh_hud_btn(self):
         from memory.config_manager import get_hud_style
-        face = get_hud_style() == "face"
+        style = get_hud_style()
         # Neither state is "off", so both read as active — this is a choice
         # between two things, not a switch with a disabled side.
-        style = f"""
+        hud_css = f"""
             QPushButton {{ background: {C.PANEL2}; color: {C.PRI};
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  " + t("HUD: ANIMATED FACE") if face
-                              else "◉  " + t("HUD: REACTOR CORE"))
-        self._hud_btn.setStyleSheet(style)
+        if style == "face":
+            label = "🧑  " + t("HUD: ANIMATED FACE")
+        elif style == "chloe":
+            label = "3D  HUD: CHLOE"
+        else:
+            label = "◉  " + t("HUD: REACTOR CORE")
+        self._hud_btn.setText(label)
+        self._hud_btn.setStyleSheet(hud_css)
         self._hud_btn.setToolTip(
-            "Uma cabeça animada que fala suas palavras e mostra o que o JARVIS está "
-            "fazendo. Toque para alternar para o núcleo do reator."
-            if face else
-            "Um núcleo de reator que gira com o estado e se move com sua voz. "
-            "Toque para alternar para a cabeça animada.")
+            "Chloe 3D com animação idle, rosto tradicional e núcleo do reator."
+            if style == "chloe" else
+            ("Uma cabeça animada que fala suas palavras e mostra o que o JARVIS está "
+             "fazendo." if style == "face" else
+             "Um núcleo de reator que gira com o estado e se move com sua voz.")
+        )
 
     def _toggle_hud_style(self):
         """Swap the centrepiece. Both objects stay in memory, so the change is
         instant and switching back costs nothing."""
         from memory.config_manager import get_hud_style, save_hud_style
-        want = "core" if get_hud_style() == "face" else "face"
+        current = get_hud_style()
+        want = {"face": "core", "core": "chloe", "chloe": "face"}[current]
         save_hud_style(want)
         try:
             self.hud.hud_style = want
+            self.hud._requested_hud_style = want
+            if want == "chloe":
+                if not self.hud._ensure_chloe():
+                    self.hud.hud_style = "face" if self.hud._avatar is not None else "core"
+                    save_hud_style(self.hud.hud_style)
             self.hud.update()
         except Exception:
             pass
         self._refresh_hud_btn()
         self._log.append_log(
-            "SYS: HUD switched to the animated face." if want == "face"
-            else "SYS: HUD switched to the reactor core.")
+            "SYS: HUD switched to Chloe 3D." if want == "chloe"
+            else ("SYS: HUD switched to the animated face." if want == "face"
+                  else "SYS: HUD switched to the reactor core."))
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,

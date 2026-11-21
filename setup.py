@@ -9,8 +9,8 @@ Playwright browsers needed for web automation (current-OS builds only).
 Two things it deliberately does NOT install:
   * the optional local wake word ("Hey Jarvis") — one-click, opt-in, from
     ⚙ → WAKE WORD inside the app;
-  * anything for the avatar — the holographic head renders in software on the
-    PyQt6 and numpy already listed here. No GPU, no OpenGL, no extra packages.
+  * anything for the avatar — the holographic head renders in software and
+    optional Chloe 3D uses local open-source PyOpenGL/pygltflib packages.
 """
 import platform
 import subprocess
@@ -97,6 +97,13 @@ def _check_assets() -> None:
             "\n⚠️  core/face_model.obj is missing or truncated — the avatar will "
             "fall back to the plain glowing core.\n"
             "    Re-clone the repository, or fetch that one file again."
+        )
+    chloe = HERE / "assets" / "private"
+    if not any((chloe / name).is_file()
+               for name in ("chloe.glb", "chloe_-_detroit_become_human.glb")):
+        print(
+            "\nℹ️  Optional Chloe 3D model not present — JARVIS will keep using "
+            "the traditional face/core avatar."
         )
 
 
