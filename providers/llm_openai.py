@@ -61,6 +61,7 @@ PRESETS: dict[str, str] = {
     "Together":             "https://api.together.xyz/v1",
     "Cerebras":             "https://api.cerebras.ai/v1",
     "MiniMax":              "https://api.minimax.io/v1",
+    "Cloudflare":           "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +147,10 @@ CATALOG = (
     {"id": "openrouter", "label": "OpenRouter",
      "note": "cloud · many models behind one key", "local": False,
      "values": {"base_url": PRESETS["OpenRouter"], **_CLOUD}},
+    {"id": "cloudflare", "label": "Cloudflare Workers AI",
+     "note": "cloud · account-scoped · approved free models", "local": False,
+     "values": {"base_url": PRESETS["Cloudflare"], "model": "@cf/meta/llama-3.1-8b-instruct",
+                "account_id": ""}},
     {"id": "together",   "label": "Together",
      "note": "cloud · needs a key", "local": False,
      "values": {"base_url": PRESETS["Together"], **_CLOUD}},
@@ -347,9 +352,14 @@ class OpenAICompatLLM:
 
         self._httpx = httpx
         self.base = _normalise(cfg.get("base_url") or "")
+        account_id = str(cfg.get("account_id") or "").strip()
+        self.account_id = account_id
+        if account_id and "{ACCOUNT_ID}" in self.base:
+            self.base = self.base.replace("{ACCOUNT_ID}", account_id)
         self.model = (cfg.get("model") or "").strip()
         self.key = (cfg.get("api_key") or "").strip()
         self.timeout = float(cfg.get("timeout") or 60.0)
+        self.last_usage: dict[str, Any] = {}
 
         # A budget on a model running on your own hardware, unless the user
         # chose one themselves.
@@ -401,6 +411,8 @@ class OpenAICompatLLM:
             return "openai_compat@openrouter"
         if host == "api.groq.com":
             return "openai_compat@groq"
+        if host == "api.cloudflare.com" and "/accounts/" in self.base:
+            return "openai_compat@cloudflare"
         return "openai_compat"
 
     def _headers(self, decision=None) -> dict:
@@ -413,7 +425,8 @@ class OpenAICompatLLM:
         from core.ai_policy import validate_provider
         return validate_provider(
             self._policy_id(),
-            {"base_url": self.base, "model": self.model},
+            {"base_url": self.base, "model": self.model,
+             "account_id": getattr(self, "account_id", "")},
         )
 
     def _body(self, messages: list[dict], tools: list[dict] | None,
@@ -452,6 +465,9 @@ class OpenAICompatLLM:
         except Exception as e:
             raise _with_address(e, self.base) from None
 
+        usage = data.get("usage") if isinstance(data, dict) else None
+        self.last_usage = dict(usage) if isinstance(usage, dict) else {}
+
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         text = msg.get("content") or ""
@@ -482,7 +498,12 @@ class OpenAICompatLLM:
                                   headers=self._headers(decision), json=body)
                 if r.status_code >= 400:
                     raise RuntimeError(f"{r.status_code} {_terse(r.text)}")
-                msg = ((r.json().get("choices") or [{}])[0].get("message") or {})
+                data = r.json()
+                usage = data.get("usage") if isinstance(data, dict) else None
+                if isinstance(usage, dict):
+                    self.last_usage = dict(usage)
+                    yield {"usage": dict(usage)}
+                msg = ((data.get("choices") or [{}])[0].get("message") or {})
                 if msg.get("content"):
                     yield {"text": msg["content"]}
                 if msg.get("tool_calls"):
@@ -505,7 +526,12 @@ class OpenAICompatLLM:
                     if payload == "[DONE]":
                         break
                     try:
-                        delta = ((json.loads(payload).get("choices") or [{}])[0]
+                        frame = json.loads(payload)
+                        usage = frame.get("usage") if isinstance(frame, dict) else None
+                        if isinstance(usage, dict):
+                            self.last_usage = dict(usage)
+                            yield {"usage": dict(usage)}
+                        delta = ((frame.get("choices") or [{}])[0]
                                  .get("delta") or {})
                     except Exception:
                         # One malformed frame must not end the answer. Servers
@@ -532,7 +558,11 @@ class OpenAICompatLLM:
             r.raise_for_status()
             data = r.json()
         rows = data.get("data") if isinstance(data, dict) else data
-        return sorted({str(m.get("id")) for m in (rows or []) if m.get("id")})
+        ids = {str(m.get("id")) for m in (rows or []) if m.get("id")}
+        if (urlparse(self.base).hostname or "").lower() == "api.cloudflare.com":
+            from core.ai_policy import _CLOUDFLARE_FREE_CHAT_MODELS
+            ids &= set(_CLOUDFLARE_FREE_CHAT_MODELS)
+        return sorted(ids)
 
     # A 1x1 transparent PNG — 68 bytes, the smallest thing that is a real image.
     _PIXEL = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
@@ -700,6 +730,9 @@ PROVIDER = {
         # plain text it rendered as a box LIST had nothing to populate.
         Field("model", "Model", kind="choice", choices=(),
               hint="Filled in from the server — press REFRESH if it is empty"),
+        Field("account_id", "Cloudflare Account ID", kind="text", required=False,
+              advanced=False,
+              hint="32 hexadecimal characters; used only for the official Cloudflare endpoint"),
         Field("api_key", "API key", kind="secret", required=False,
               hint="Local servers usually need none"),
         # Filled in by TEST, not asked. The user is the wrong person to ask
@@ -716,7 +749,7 @@ PROVIDER = {
               required=False, advanced=True,
               hint="0 = no limit. Characters of tool descriptions sent each  turn"),
     ),
-    "caps": {"tools": True, "tool_format": "openai"},
+    "caps": {"tools": True, "tool_format": "openai", "streaming": True},
     "factory": _make,
 }
 

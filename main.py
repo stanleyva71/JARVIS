@@ -2401,7 +2401,8 @@ class JarvisLive:
         try:
             from memory.config_manager import (get_ai_router_alternatives,
                                                get_pipeline,
-                                               get_provider_config)
+                                               get_provider_config,
+                                               save_provider_config)
             from providers import registry
             from core.ai_router import AIRouter
 
@@ -2416,6 +2417,7 @@ class JarvisLive:
                 llm_id,
                 get_ai_router_alternatives(),
                 config_getter=get_provider_config,
+                config_setter=save_provider_config,
             )
 
             # Ask the model whether it can see, once, and remember the answer.
@@ -2473,7 +2475,8 @@ class JarvisLive:
 
         from memory.config_manager import (get_ai_router_alternatives,
                                            get_pipeline,
-                                           get_provider_config)
+                                           get_provider_config,
+                                           save_provider_config)
         from providers import registry
         from providers.engine_pipeline import PipelineEngine
         from core.ai_router import AIRouter
@@ -2496,6 +2499,7 @@ class JarvisLive:
             llm_id,
             get_ai_router_alternatives(),
             config_getter=get_provider_config,
+            config_setter=save_provider_config,
         ) if llm_id else None
         if llm is not None:
             from memory.config_manager import save_provider_config

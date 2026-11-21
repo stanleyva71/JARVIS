@@ -2766,7 +2766,8 @@ class ProvidersOverlay(_HudOverlay):
         from memory.config_manager import (get_coding_provider, get_pipeline,
                                            get_provider_config,
                                            get_provider_mode, get_sidecar_first,
-                                           get_sidecar_provider)
+                                           get_sidecar_provider,
+                                           get_ai_router_alternatives)
         from providers import registry
 
         self._registry = registry
@@ -2886,6 +2887,7 @@ class ProvidersOverlay(_HudOverlay):
         self._sidecar = self._normalise(get_sidecar_provider(), "llm")
         self._coding = self._normalise(get_coding_provider(), "llm")
         self._sidecar_first = get_sidecar_first()
+        self._alternatives = list(get_ai_router_alternatives())
         self._rebuild_body()
 
         outer.addWidget(self._footer)
@@ -3259,6 +3261,7 @@ class ProvidersOverlay(_HudOverlay):
         if self._mode == "pipeline":
             for slot, num, name, what in self._SLOTS:
                 self._body_lay.addWidget(self._slot_box(slot, num, name, what))
+            self._body_lay.addWidget(self._alternatives_box_widget())
         else:
             w, lay = self._box([])
             lay.addWidget(self._label(
@@ -3303,6 +3306,36 @@ class ProvidersOverlay(_HudOverlay):
 
         if sid:
             self._fields_into(lay, slot, sid)
+            cfg = dict(self._get_cfg(sid))
+            base, eid = self._parts(sid, slot)
+            decl = self._registry.get_declaration(base) or {}
+            caps = dict(decl.get("caps") or {})
+            caps.update({
+                "vision": bool(str(cfg.get("vision", "")).strip()),
+                "tools": caps.get("tools", False),
+                "streaming": caps.get("streaming", False),
+            })
+            model = str(cfg.get("model") or "model not set")
+            bits = [
+                f"Model: {model}",
+                "Tools: " + ("yes" if caps["tools"] else "no"),
+                "Vision: " + ("yes" if caps["vision"] else "no"),
+                "Streaming: " + ("yes" if caps["streaming"] else "no"),
+            ]
+            if cfg.get("max_tools"):
+                bits.append(f"Limit: {cfg['max_tools']} tools")
+            if cfg.get("cooldown_until_wall"):
+                try:
+                    import time
+                    remaining = max(0, int(float(cfg["cooldown_until_wall"]) - time.time()))
+                    if remaining:
+                        bits.append(f"Cooldown: {remaining}s")
+                except (TypeError, ValueError):
+                    pass
+            usage = cfg.get("usage")
+            if isinstance(usage, dict) and usage:
+                bits.append("Usage: " + str(usage)[:80])
+            lay.addWidget(self._label(" · ".join(bits), 7, C.TEXT_DIM))
             # If a list was already fetched, use it; if not, go and get one.
             if self._model_cache.get(sid):
                 QTimer.singleShot(0, lambda p=sid: self._on_models_ready(
@@ -3603,6 +3636,88 @@ class ProvidersOverlay(_HudOverlay):
             self._fetch_models(sid)
         QTimer.singleShot(0, self._rebuild_body)
 
+    def _alternatives_box_widget(self) -> QWidget:
+        """Ordered fallback list for the Pipeline thinking provider."""
+        head = self._label("↕  THINKING FALLBACK ORDER", 9, C.PRI, bold=True)
+        w, lay = self._box([head])
+        lay.addWidget(self._label(
+            "The primary ② model is tried first. Alternatives are tried only "
+            "for recoverable failures, in this order. Paid or cost-unknown "
+            "models stay blocked.",
+            7, C.TEXT_DIM))
+
+        def fmt(entry, _decl):
+            mark = "🖥" if entry.get("local") is True else (
+                "☁" if entry.get("local") is False else " ")
+            return f"{mark}  {entry['label']}"
+
+        self._alternative_combos = []
+        order = list(dict.fromkeys(
+            pid for pid in self._alternatives
+            if pid != self._pipe.get("llm")
+        ))
+        for index, sid in enumerate(order):
+            row = QHBoxLayout()
+            combo = self._service_combo(
+                "llm", (t("— remove —"), ""), fmt)
+            self._select(combo, sid)
+            row.addWidget(combo, 1)
+            up = self._btn("↑", lambda _=0, i=index: self._move_alternative(i, -1))
+            down = self._btn("↓", lambda _=0, i=index: self._move_alternative(i, 1))
+            remove = self._btn("×", lambda _=0, i=index: self._remove_alternative(i))
+            row.addWidget(up); row.addWidget(down); row.addWidget(remove)
+            holder = QWidget(); holder.setLayout(row)
+            holder.setStyleSheet("background: transparent; border: none;")
+            lay.addWidget(holder)
+            combo.currentIndexChanged.connect(
+                lambda _i, i=index, b=combo: self._replace_alternative(i, b))
+            self._alternative_combos.append(combo)
+
+        add = self._btn(
+            "+  ADD ALTERNATIVE",
+            lambda _=0: self._add_alternative(),
+        )
+        lay.addWidget(add)
+        return w
+
+    def _remember_alternative_combos(self) -> None:
+        values = []
+        for combo in getattr(self, "_alternative_combos", []):
+            sid = combo.currentData() or ""
+            if sid and sid != self._pipe.get("llm") and sid not in values:
+                values.append(sid)
+        self._alternatives = values
+
+    def _replace_alternative(self, index: int, combo: QComboBox) -> None:
+        self._remember_alternative_combos()
+        sid = combo.currentData() or ""
+        if sid:
+            self._apply_entry("llm", sid)
+            self._fetch_models(sid)
+        QTimer.singleShot(0, self._rebuild_body)
+
+    def _add_alternative(self) -> None:
+        self._remember_alternative_combos()
+        if len(self._alternatives) >= 4:
+            return
+        self._alternatives.append("")
+        QTimer.singleShot(0, self._rebuild_body)
+
+    def _remove_alternative(self, index: int) -> None:
+        self._remember_alternative_combos()
+        if 0 <= index < len(self._alternatives):
+            del self._alternatives[index]
+        QTimer.singleShot(0, self._rebuild_body)
+
+    def _move_alternative(self, index: int, delta: int) -> None:
+        self._remember_alternative_combos()
+        new_index = index + delta
+        if 0 <= new_index < len(self._alternatives):
+            self._alternatives[index], self._alternatives[new_index] = (
+                self._alternatives[new_index], self._alternatives[index]
+            )
+        QTimer.singleShot(0, self._rebuild_body)
+
     def _update_footer(self) -> None:
         if self._mode != "pipeline":
             self._footer.setText(
@@ -3773,6 +3888,8 @@ class ProvidersOverlay(_HudOverlay):
 
         # ONE write, not five. See save_providers for what the five cost.
         creds = {sid: self._values(sid) for sid in list(self._edits)}
+        if hasattr(self, "_alternative_combos"):
+            self._remember_alternative_combos()
 
         save_providers(
             mode=self._mode,
@@ -3783,6 +3900,7 @@ class ProvidersOverlay(_HudOverlay):
             sidecar=self._sidecar,
             sidecar_first=self._first_combo.currentData() == "before",
             coding=self._coding,
+            ai_router_alternatives=self._alternatives,
         )
 
         # Providers are cached by configuration; a changed setting must not go

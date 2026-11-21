@@ -18,12 +18,14 @@ class AIRouter:
         *,
         config_getter: Callable[[str], dict] | None = None,
         builder: Callable[[str, dict], Any] | None = None,
+        config_setter: Callable[[str, dict], None] | None = None,
     ) -> None:
         self.primary_id = str(primary_id or "").strip()
         self.alternatives = tuple(str(pid).strip() for pid in alternatives
                                   if str(pid).strip())
         self._config_getter = config_getter
         self._builder = builder
+        self._config_setter = config_setter
         self._cooldown: dict[str, float] = {}
         self._last: Any = None
         self._partial = False
@@ -66,9 +68,19 @@ class AIRouter:
 
     def _cooling(self, provider_id: str) -> bool:
         until = self._cooldown.get(provider_id, 0.0)
-        if until and time.monotonic() < until:
-            return True
-        self._cooldown.pop(provider_id, None)
+        if until:
+            if time.monotonic() < until:
+                return True
+            self._cooldown.pop(provider_id, None)
+            return False
+        try:
+            wall_until = float(self._config(provider_id).get("cooldown_until_wall") or 0)
+        except (TypeError, ValueError):
+            wall_until = 0.0
+        if wall_until:
+            if time.time() < wall_until:
+                return True
+            return False
         return False
 
     def _rest(self, provider_id: str, info) -> None:
@@ -81,12 +93,25 @@ class AIRouter:
         else:
             return
         self._cooldown[provider_id] = time.monotonic() + seconds
+        if self._config_setter is not None:
+            try:
+                self._config_setter(
+                    provider_id,
+                    {"cooldown_until_wall": float(time.time() + seconds)},
+                )
+            except Exception:
+                pass
 
     def cooling_until(self, provider_id: str) -> float:
         return self._cooldown.get(provider_id, 0.0)
 
     def clear_cooldown(self, provider_id: str) -> None:
         self._cooldown.pop(provider_id, None)
+        if self._config_setter is not None:
+            try:
+                self._config_setter(provider_id, {"cooldown_until_wall": 0})
+            except Exception:
+                pass
 
     def _fallback_allowed(self, info) -> bool:
         return info.recoverable and not self._partial
@@ -188,6 +213,12 @@ class AIRouter:
                     stream=stream,
                     temperature=temperature,
                 ):
+                    usage = event.get("usage") if isinstance(event, dict) else None
+                    if usage and self._config_setter is not None:
+                        try:
+                            self._config_setter(provider_id, {"usage": dict(usage)})
+                        except Exception:
+                            pass
                     if event.get("text") or event.get("tool_calls"):
                         self._partial = True
                     yield event
@@ -230,12 +261,19 @@ class AIRouter:
                 self._copy_primary_caps(provider)
                 if provider_id == self.primary_id:
                     self.caps.update(self._provider_caps(provider))
-                return provider.complete(
+                text, calls = provider.complete(
                     messages,
                     tools,
                     timeout=timeout,
                     temperature=temperature,
                 )
+                usage = getattr(provider, "last_usage", None)
+                if usage and self._config_setter is not None:
+                    try:
+                        self._config_setter(provider_id, {"usage": dict(usage)})
+                    except Exception:
+                        pass
+                return text, calls
             except Exception as exc:
                 info = classify_error(exc, provider=provider_id)
                 self._rest(provider_id, info)

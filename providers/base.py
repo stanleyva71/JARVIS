@@ -69,6 +69,7 @@ from typing import Any, AsyncIterator, Optional, Protocol, Sequence
 # self-knowledge was built for exactly this shape of problem; a capability dict
 # is the input it was waiting for.
 DEFAULT_CAPS: dict[str, Any] = {
+    "streaming": False,
     # Can the model be handed an image? Decides whether `screen_process` and the
     # camera are declared at all.
     "vision": False,

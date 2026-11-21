@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import ip_address
+import re
 from urllib.parse import urlparse
 
 
@@ -46,6 +47,18 @@ _GROQ_FREE_MODELS = {
     "qwen/qwen3-32b",
 }
 
+# Account-scoped Workers AI models that are known to work in the OpenAI-compatible
+# chat API and do not require a separate paid model purchase. This is deliberately
+# conservative: unknown/new Workers AI models stay blocked by default.
+_CLOUDFLARE_FREE_CHAT_MODELS = {
+    "@cf/meta/llama-3.1-8b-instruct",
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "@cf/qwen/qwen2.5-coder-32b-instruct",
+    "@cf/qwen/qwen3-30b-a3b-fp8",
+}
+
+_CLOUDFLARE_ACCOUNT_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
 
 def _host_is_local(url: str) -> bool:
     try:
@@ -81,6 +94,15 @@ def validate_gemini_model(model: str, *, live: bool = False) -> None:
     allowed = _GEMINI_LIVE_MODELS if live else _GEMINI_TEXT_MODELS
     if model not in allowed:
         raise PolicyViolation(f"Gemini model is not approved: {model or '<empty>'}")
+
+
+def validate_cloudflare_account_id(account_id: str) -> str:
+    account_id = str(account_id or "").strip()
+    if not _CLOUDFLARE_ACCOUNT_RE.fullmatch(account_id):
+        raise PolicyViolation(
+            "Cloudflare account ID must be exactly 32 hexadecimal characters"
+        )
+    return account_id.lower()
 
 
 def validate_provider(provider_id: str, cfg: dict,
@@ -162,9 +184,28 @@ def validate_provider(provider_id: str, cfg: dict,
     if entry == "openrouter":
         if not _is_official_https(url, "openrouter.ai", "/api/v1"):
             raise PolicyViolation("OpenRouter requires the official HTTPS endpoint")
-        if not model.endswith(":free"):
+        if model != "openrouter/free" and not model.endswith(":free"):
             raise PolicyViolation(
-                "OpenRouter is restricted to models ending with ':free'"
+                "OpenRouter is restricted to ':free' models or the openrouter/free alias"
+            )
+        return PolicyDecision(raw_id, model, False, True)
+
+    if entry == "cloudflare":
+        account_id = validate_cloudflare_account_id(
+            (cfg or {}).get("account_id")
+        )
+        expected_path = f"/client/v4/accounts/{account_id}/ai/v1"
+        if not _is_official_https(
+            url,
+            "api.cloudflare.com",
+            expected_path,
+        ):
+            raise PolicyViolation(
+                "Cloudflare requires its official account-scoped HTTPS endpoint"
+            )
+        if model not in _CLOUDFLARE_FREE_CHAT_MODELS:
+            raise PolicyViolation(
+                "Cloudflare is restricted to approved free Workers AI chat models"
             )
         return PolicyDecision(raw_id, model, False, True)
 

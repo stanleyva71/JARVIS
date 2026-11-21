@@ -636,6 +636,39 @@ def test_ai_policy_and_errors():
               {"base_url": "https://openrouter.ai/api/v1",
                "model": "meta-llama/llama-3.1-8b-instruct:free"},
           ).free_only)
+    check("OpenRouter free alias is allowed",
+          validate_provider(
+              "openai_compat@openrouter",
+              {"base_url": "https://openrouter.ai/api/v1",
+               "model": "openrouter/free"},
+          ).free_only)
+    account_id = "0123456789abcdef0123456789abcdef"
+    check("Cloudflare official account endpoint is allowed",
+          validate_provider(
+              "openai_compat@cloudflare",
+              {"base_url":
+               f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+               "account_id": account_id,
+               "model": "@cf/meta/llama-3.1-8b-instruct"},
+          ).free_only)
+    check("Cloudflare fake account ID is blocked",
+          blocked("openai_compat@cloudflare",
+                  {"base_url":
+                   f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+                   "account_id": "short",
+                   "model": "@cf/meta/llama-3.1-8b-instruct"}))
+    check("Cloudflare account endpoint mismatch is blocked",
+          blocked("openai_compat@cloudflare",
+                  {"base_url":
+                   "https://api.cloudflare.com/client/v4/accounts/1234/ai/v1",
+                   "account_id": account_id,
+                   "model": "@cf/meta/llama-3.1-8b-instruct"}))
+    check("Cloudflare unknown model is blocked",
+          blocked("openai_compat@cloudflare",
+                  {"base_url":
+                   f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+                   "account_id": account_id,
+                   "model": "@cf/openai/gpt-4o-unknown"}))
     check("Groq approved free model is allowed",
           validate_provider(
               "openai_compat@groq",
@@ -825,8 +858,15 @@ async def test_ai_router_fallback():
           calls[-1:] == [primary] and events == [{"text": "Primary answer"}])
 
     calls.clear()
+    persisted: dict[str, dict] = {}
+    persistent_getter = lambda pid: {
+        **config_getter(pid),
+        **persisted.get(pid, {}),
+    }
+    persistent_setter = lambda pid, values: persisted.setdefault(pid, {}).update(values)
     router = AIRouter(primary, (ollama,),
-                      config_getter=config_getter,
+                      config_getter=persistent_getter,
+                      config_setter=persistent_setter,
                       builder=lambda pid, cfg: FakeLLM(
                           pid,
                           [{"text": "fallback"}] if pid == ollama else [],
@@ -903,6 +943,8 @@ async def test_ai_router_fallback():
                           if pid == primary else None))
     await collect(router)
     cooled = router.cooling_until(primary) > 0
+    check("cooldown state is persisted for providers",
+          float(persisted.get(primary, {}).get("cooldown_until_wall") or 0) > 0)
     calls.clear()
     await collect(router)
     check("cooldown skips an unavailable provider",
