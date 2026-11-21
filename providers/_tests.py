@@ -506,6 +506,65 @@ async def test_failures_name_the_part():
           "language model" in said2, repr(said2))
 
 
+async def test_partial_streaming_is_not_recoverable():
+    import contextlib
+    import io
+
+    import providers.engine_pipeline as pipeline
+    from core.ai_errors import classify_error
+    from providers.engine_pipeline import PipelineEngine
+
+    section("[21] Partial streaming is not recoverable")
+
+    class PartialLLM:
+        caps = {"tools": False, "tool_format": None}
+        base = "http://127.0.0.1:11434/v1"
+        api_key = "STREAM_SECRET"
+
+        async def chat(self, messages, tools=None, **kw):
+            yield {"text": "Partial answer. More words after sentence "}
+            raise RuntimeError("timeout Authorization: Bearer STREAM_SECRET")
+
+    seen = {}
+    real_classify = pipeline.classify_error
+
+    def capture(error, **kwargs):
+        seen.update(kwargs)
+        return real_classify(error, **kwargs)
+
+    pipeline.classify_error = capture
+    output = io.StringIO()
+    logs: list[str] = []
+    said: list[str] = []
+    try:
+        async def drain(engine):
+            async for message in engine.receive():
+                if message.server_content:
+                    if message.server_content.output_transcription:
+                        said.append(message.server_content.output_transcription.text)
+                    if message.server_content.turn_complete:
+                        return
+
+        engine = PipelineEngine(PartialLLM(), config=Cfg(), log=logs.append)
+        task = asyncio.create_task(drain(engine))
+        with contextlib.redirect_stdout(output):
+            await engine.send_client_content(
+                turns={"role": "user", "parts": [{"text": "hi"}]})
+            await asyncio.wait_for(task, 15)
+    finally:
+        pipeline.classify_error = real_classify
+
+    info = classify_error("timeout after streamed text", partial=True)
+    check("stream failure is classified with partial=True",
+          seen.get("partial") is True and not info.recoverable, str(seen))
+    check("partial response reached the consumer",
+          "Partial answer." in "".join(said), repr(said))
+    check("credentials are absent from traceback and activity log",
+          "STREAM_SECRET" not in output.getvalue()
+          and all("STREAM_SECRET" not in log for log in logs),
+          output.getvalue() + repr(logs))
+
+
 def test_addresses():
     from providers.llm_openai import _normalise
 
@@ -543,6 +602,14 @@ def test_ai_policy_and_errors():
           blocked("openai_compat@openrouter",
                   {"base_url": "https://openrouter.ai/api/v1",
                    "model": "openai/gpt-4o"}))
+    check("OpenRouter fake hostname is blocked",
+          blocked("openai_compat@openrouter",
+                  {"base_url": "https://openrouter.ai.evil.test/api/v1",
+                   "model": "meta-llama/llama-3.1-8b-instruct:free"}))
+    check("OpenRouter HTTP endpoint is blocked",
+          blocked("openai_compat@openrouter",
+                  {"base_url": "http://openrouter.ai/api/v1",
+                   "model": "meta-llama/llama-3.1-8b-instruct:free"}))
     check("OpenRouter free model is allowed",
           validate_provider(
               "openai_compat@openrouter",
@@ -555,6 +622,27 @@ def test_ai_policy_and_errors():
               {"base_url": "https://api.groq.com/openai/v1",
                "model": "llama-3.1-8b-instant", "api_key": "secret"},
           ).free_only)
+    check("Groq fake hostname is blocked",
+          blocked("openai_compat@groq",
+                  {"base_url": "https://api.groq.com.evil.test/openai/v1",
+                   "model": "llama-3.1-8b-instant"}))
+    check("Groq HTTP endpoint is blocked",
+          blocked("openai_compat@groq",
+                  {"base_url": "http://api.groq.com/openai/v1",
+                   "model": "llama-3.1-8b-instant"}))
+    check("remote local endpoint is blocked",
+          blocked("openai_compat@ollama",
+                  {"base_url": "http://192.168.1.50:11434/v1",
+                   "model": "qwen3:8b"}))
+    from providers.llm_openai import OpenAICompatLLM
+    local_with_key = OpenAICompatLLM({
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "qwen3:8b",
+        "api_key": "LOCAL_SECRET",
+    })
+    check("local endpoints never receive an API key",
+          "Authorization" not in local_with_key._headers(
+              local_with_key._validate_request()))
     check("unknown provider is blocked",
           blocked("unknown@service",
                   {"model": "m", "base_url": "http://127.0.0.1"}))
@@ -575,6 +663,9 @@ def test_ai_policy_and_errors():
     for message, expected in cases:
         check(f"classifies {expected.value}",
               classify_error(message).kind is expected)
+    check("404 not configured is configuration error",
+          classify_error("404 not configured: API key").kind
+          is ErrorKind.INVALID_CONFIGURATION)
 
     partial = classify_error("timeout after streamed text", partial=True)
     check("partial responses are not recoverable",
@@ -1161,6 +1252,7 @@ async def main() -> int:
     test_a_chosen_voice_downloads_itself()
     test_panel_settings_survive()
     test_ai_policy_and_errors()
+    await test_partial_streaming_is_not_recoverable()
 
     print(f"\n{'=' * 56}")
     print(f"{_ok} passed, {_fail} failed")

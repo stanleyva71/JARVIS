@@ -32,8 +32,11 @@ class ErrorInfo:
 
 
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*([^\s,;]+)"),
-    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([^\s,;]+)"),
+    re.compile(
+        r"(?i)(api[_-]?key|token|password|secret|authorization)"
+        r"\s*['\"]?\s*[:=]\s*['\"]?(?:bearer\s+)?([^\s,'\"};]+)"
+    ),
+    re.compile(r"(?i)(bearer)\s+([^\s,'\"};]+)"),
 )
 
 
@@ -62,8 +65,10 @@ def classify_error(
     text = redact_credentials(error)
     low = text.lower()
 
-    if any(token in low for token in ("401", "403", "api key", "unauthorized",
-                                      "authentication", "invalid api key")):
+    if "not configured" in low:
+        kind = ErrorKind.INVALID_CONFIGURATION
+    elif any(token in low for token in ("401", "403", "api key", "unauthorized",
+                                        "authentication", "invalid api key")):
         kind = ErrorKind.AUTHENTICATION
     elif "429" in low or "resource_exhausted" in low:
         kind = ErrorKind.QUOTA_EXHAUSTED if any(
@@ -79,14 +84,14 @@ def classify_error(
     elif any(token in low for token in ("503", "504", "service unavailable",
                                         "temporarily unavailable", "overloaded")):
         kind = ErrorKind.UNAVAILABLE
-    elif any(token in low for token in ("404", "not found", "unknown model",
-                                        "model does not exist")):
-        kind = ErrorKind.MODEL_NOT_FOUND
     elif any(token in low for token in ("invalid configuration", "not configured",
                                         "no model", "no address", "missing",
                                         "not approved", "policy blocked",
                                         "restricted to")):
         kind = ErrorKind.INVALID_CONFIGURATION
+    elif any(token in low for token in ("404", "not found", "unknown model",
+                                        "model does not exist")):
+        kind = ErrorKind.MODEL_NOT_FOUND
     elif any(token in low for token in ("invalid response", "malformed",
                                         "invalid json", "empty answer",
                                         "unexpected response")):

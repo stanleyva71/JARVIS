@@ -402,11 +402,18 @@ class OpenAICompatLLM:
             return "openai_compat@groq"
         return "openai_compat"
 
-    def _headers(self) -> dict:
+    def _headers(self, decision=None) -> dict:
         h = {"Content-Type": "application/json"}
-        if self.key:
+        if self.key and (decision is None or not decision.local):
             h["Authorization"] = f"Bearer {self.key}"
         return h
+
+    def _validate_request(self):
+        from core.ai_policy import validate_provider
+        return validate_provider(
+            self._policy_id(),
+            {"base_url": self.base, "model": self.model},
+        )
 
     def _body(self, messages: list[dict], tools: list[dict] | None,
               stream: bool, temperature: float | None) -> dict:
@@ -431,16 +438,12 @@ class OpenAICompatLLM:
                  temperature: float | None = None) -> tuple[str, list[FunctionCall]]:
         """Text and any tool calls. Raises on failure so the ladder can read the
         error, classify it and rest this rung exactly as it rests a Gemini one."""
-        from core.ai_policy import validate_provider
-        validate_provider(
-            self._policy_id(),
-            {"base_url": self.base, "model": self.model},
-        )
+        decision = self._validate_request()
         try:
             with self._httpx.Client(timeout=timeout or self.timeout,
                                     trust_env=self._trust_env) as cl:
                 r = cl.post(f"{self.base}/chat/completions",
-                            headers=self._headers(),
+                            headers=self._headers(decision),
                             json=self._body(messages, tools, False, temperature))
                 if r.status_code >= 400:
                     raise RuntimeError(f"{r.status_code} {_terse(r.text)}")
@@ -464,11 +467,7 @@ class OpenAICompatLLM:
         the end. Streaming is what lets speech start before the sentence is
         finished; a server that cannot stream still works, it just answers all
         at once."""
-        from core.ai_policy import validate_provider
-        validate_provider(
-            self._policy_id(),
-            {"base_url": self.base, "model": self.model},
-        )
+        decision = self._validate_request()
         body = self._body(messages, tools, stream, temperature)
 
         # Not wrapped with the address here: the streaming path is only used by
@@ -479,7 +478,7 @@ class OpenAICompatLLM:
                                            trust_env=self._trust_env) as cl:
             if not stream:
                 r = await cl.post(f"{self.base}/chat/completions",
-                                  headers=self._headers(), json=body)
+                                  headers=self._headers(decision), json=body)
                 if r.status_code >= 400:
                     raise RuntimeError(f"{r.status_code} {_terse(r.text)}")
                 msg = ((r.json().get("choices") or [{}])[0].get("message") or {})
@@ -494,7 +493,7 @@ class OpenAICompatLLM:
 
             buf = _ToolCallBuffer()
             async with cl.stream("POST", f"{self.base}/chat/completions",
-                                 headers=self._headers(), json=body) as r:
+                                 headers=self._headers(decision), json=body) as r:
                 if r.status_code >= 400:
                     detail = _terse((await r.aread()).decode("utf-8", "replace"))
                     raise RuntimeError(f"{r.status_code} {detail}")
@@ -524,9 +523,11 @@ class OpenAICompatLLM:
     def models(self, timeout: float = 8.0) -> list[str]:
         """What this endpoint offers, so the panel can present a list instead of
         asking someone to type a model name exactly right."""
+        decision = self._validate_request()
         with self._httpx.Client(timeout=timeout,
                                 trust_env=self._trust_env) as cl:
-            r = cl.get(f"{self.base}/models", headers=self._headers())
+            r = cl.get(f"{self.base}/models",
+                       headers=self._headers(decision))
             r.raise_for_status()
             data = r.json()
         rows = data.get("data") if isinstance(data, dict) else data

@@ -207,8 +207,18 @@ class WhisperSTT:
         from .llm_openai import _normalise, _is_loopback, _terse
 
         base = _normalise(self.base_url)
+        from core.ai_policy import validate_provider
+        entry = "groq" if (base.partition("://")[2].split("/", 1)[0].lower()
+                           == "api.groq.com") else "custom"
+        decision = validate_provider(
+            f"whisper@{entry}",
+            {"base_url": base, "model": self.model_name,
+             "backend": self.backend},
+            declaration=PROVIDER,
+        )
         wav = audio.to_wav(pcm, rate=sample_rate)
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        headers = ({"Authorization": f"Bearer {self.api_key}"}
+                   if self.api_key and not decision.local else {})
         data = {"model": self.model_name, "response_format": "json"}
         if self.language:
             data["language"] = self.language

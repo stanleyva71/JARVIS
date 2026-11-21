@@ -50,11 +50,24 @@ _GROQ_FREE_MODELS = {
 def _host_is_local(url: str) -> bool:
     try:
         host = (urlparse(url).hostname or "").lower()
-        if host in {"localhost", "::1"}:
+        if host == "localhost" or host == "::1":
             return True
-        return ip_address(host).is_private or ip_address(host).is_loopback
+        return ip_address(host).is_loopback
     except ValueError:
-        return host.endswith((".local", ".lan"))
+        return False
+
+
+def _is_official_https(url: str, hostname: str) -> bool:
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == hostname
+        and port in (None, 443)
+    )
 
 
 def validate_gemini_model(model: str, *, live: bool = False) -> None:
@@ -81,6 +94,16 @@ def validate_provider(provider_id: str, cfg: dict,
     catalog = (declaration or {}).get("catalog") or ()
     entry_row = next((row for row in catalog if row.get("id") == entry), None)
     if entry_row and entry_row.get("local") is True:
+        if base == "openai_compat" and not _host_is_local(url):
+            raise PolicyViolation(
+                f"local provider must use loopback address: {entry}"
+            )
+        if base == "whisper" and (cfg or {}).get("backend") == "api":
+            raise PolicyViolation(f"local provider cannot use an API backend: {entry}")
+        if url and not _host_is_local(url):
+            raise PolicyViolation(
+                f"local provider must use loopback address: {entry}"
+            )
         return PolicyDecision(raw_id, model, True, True)
 
     if base != "openai_compat":
@@ -122,6 +145,8 @@ def validate_provider(provider_id: str, cfg: dict,
         return PolicyDecision(raw_id, model, True, True)
 
     if entry == "openrouter":
+        if not _is_official_https(url, "openrouter.ai"):
+            raise PolicyViolation("OpenRouter requires the official HTTPS endpoint")
         if not model.endswith(":free"):
             raise PolicyViolation(
                 "OpenRouter is restricted to models ending with ':free'"
@@ -129,6 +154,8 @@ def validate_provider(provider_id: str, cfg: dict,
         return PolicyDecision(raw_id, model, False, True)
 
     if entry == "groq":
+        if not _is_official_https(url, "api.groq.com"):
+            raise PolicyViolation("Groq requires the official HTTPS endpoint")
         if model not in _GROQ_FREE_MODELS:
             raise PolicyViolation(
                 "Groq is restricted to the approved free-tier model list"

@@ -51,7 +51,7 @@ from typing import Any, AsyncIterator, Optional
 
 from . import schema
 from .base import DEFAULT_CAPS, FunctionCall, Msg
-from core.ai_errors import classify_error
+from core.ai_errors import classify_error, redact_credentials
 
 # How much conversation to carry. Gemini Live compresses its own context with a
 # sliding window server-side; a stateless chat API has no such thing, so the
@@ -443,6 +443,7 @@ class PipelineEngine:
     async def _generate(self) -> None:
         said: list[str] = []
         calls: list[FunctionCall] = []
+        partial = False
         t0 = time.monotonic()
         first_word = None
         thinking = _ReasoningFilter()
@@ -467,6 +468,7 @@ class PipelineEngine:
                     for sentence in ready:
                         said.append(sentence)
                         await self._emit(Msg.said(sentence))
+                        partial = True
                         await self._speak(sentence)
                 if ev.get("tool_calls"):
                     calls.extend(ev["tool_calls"])
@@ -477,6 +479,7 @@ class PipelineEngine:
                 if first_word is None:
                     first_word = time.monotonic() - t0
                 await self._emit(Msg.said(pending.strip()))
+                partial = True
                 await self._speak(pending.strip())
             if thinking.hid:
                 self._timing["thought"] = thinking.hid
@@ -587,7 +590,7 @@ class PipelineEngine:
             # A failed generation must still end the turn. Without this the UI
             # sits in THINKING for ever and the stall watchdog reconnects an
             # engine whose only problem was one bad request.
-            self._report("the language model", self._llm, e)
+            self._report("the language model", self._llm, e, partial=partial)
             await self._emit(Msg.said(_failure_line("the language model", e)))
             await self._emit(Msg.turn_end())
 
@@ -602,6 +605,7 @@ class PipelineEngine:
         t0 = time.monotonic()
         first = None
         total = 0
+        delivered = False
         # The language the user was heard speaking, handed to a voice that has
         # one per language. A voice that does not take the argument never sees
         # it — this is the only place that knows both halves.
@@ -616,6 +620,7 @@ class PipelineEngine:
                         first = time.monotonic() - t0
                     total += len(pcm)
                     await self._emit(Msg.audio(pcm))
+                    delivered = True
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -623,7 +628,7 @@ class PipelineEngine:
             # in a way that cost real time: with a broken voice the assistant
             # reported "I could not reach the model", which sent the search to
             # the language model — the one part that was working.
-            self._report("the voice", self._tts, e)
+            self._report("the voice", self._tts, e, partial=delivered)
             return
 
         # Accumulated rather than assigned: a turn that calls a tool speaks
@@ -701,7 +706,8 @@ class PipelineEngine:
         _console("\n".join(lines))
 
     # ── saying what actually broke ───────────────────────────────────────────
-    def _report(self, what: str, provider, exc: Exception) -> None:
+    def _report(self, what: str, provider, exc: Exception,
+                *, partial: bool = False) -> None:
         """Name the part, name the address, and put the traceback on the console.
 
         Two faults are being fixed here at once, both found by trying to debug a
@@ -721,14 +727,19 @@ class PipelineEngine:
         import traceback
 
         where = _target_of(provider)
-        info = classify_error(exc, provider=_name_of(provider))
-        detail = info.message[:160] or exc.__class__.__name__
+        secrets = _provider_secrets(provider)
+        info = classify_error(exc, provider=_name_of(provider),
+                              partial=partial)
+        detail = (redact_credentials(info.message, *secrets)[:160]
+                  or exc.__class__.__name__)
         self._log(f"SYS: {what} failed{f' ({where})' if where else ''} - "
                   f"{info.kind.value}: {detail}")
         _console(f"[Pipeline] {what} failed"
                  f"{f' at {where}' if where else ''}: "
                  f"{info.kind.value}: {detail}")
-        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        trace = "".join(traceback.format_exception(type(exc), exc,
+                                                    exc.__traceback__))
+        _console(redact_credentials(trace, *secrets).rstrip())
 
     async def _emit(self, msg: Msg) -> None:
         if not self._closed:
@@ -1052,6 +1063,15 @@ def _target_of(provider) -> str:
         if value:
             return str(value)
     return provider.__class__.__name__ if provider is not None else ""
+
+
+def _provider_secrets(provider) -> tuple[str, ...]:
+    if provider is None:
+        return ()
+    return tuple(
+        str(value) for name in ("api_key", "key", "token", "password")
+        if (value := getattr(provider, name, ""))
+    )
 
 
 def _failure_line(what: str, exc: Exception) -> str:
