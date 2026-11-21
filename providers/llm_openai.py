@@ -149,8 +149,8 @@ CATALOG = (
      "values": {"base_url": PRESETS["OpenRouter"], **_CLOUD}},
     {"id": "cloudflare", "label": "Cloudflare Workers AI",
      "note": "cloud · account-scoped · approved free models", "local": False,
-     "values": {"base_url": PRESETS["Cloudflare"], "model": "@cf/meta/llama-3.1-8b-instruct",
-                "account_id": ""}},
+     "values": {"base_url": PRESETS["Cloudflare"], "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                "account_id": "", "cloudflare_plan": "unknown"}},
     {"id": "together",   "label": "Together",
      "note": "cloud · needs a key", "local": False,
      "values": {"base_url": PRESETS["Together"], **_CLOUD}},
@@ -354,12 +354,15 @@ class OpenAICompatLLM:
         self.base = _normalise(cfg.get("base_url") or "")
         account_id = str(cfg.get("account_id") or "").strip()
         self.account_id = account_id
+        self.cloudflare_plan = str(cfg.get("cloudflare_plan") or "unknown").strip().lower()
         if account_id and "{ACCOUNT_ID}" in self.base:
             self.base = self.base.replace("{ACCOUNT_ID}", account_id)
         self.model = (cfg.get("model") or "").strip()
         self.key = (cfg.get("api_key") or "").strip()
         self.timeout = float(cfg.get("timeout") or 60.0)
         self.last_usage: dict[str, Any] = {}
+        accumulated = cfg.get("usage_accumulated")
+        self.usage_accumulated = dict(accumulated) if isinstance(accumulated, dict) else {}
 
         # A budget on a model running on your own hardware, unless the user
         # chose one themselves.
@@ -404,6 +407,35 @@ class OpenAICompatLLM:
         if self._vision_known and self._vision_known != self.model:
             self._vision_known = ""
 
+    def _record_usage(self, usage: dict | None) -> dict:
+        usage = dict(usage or {})
+        self.last_usage = usage
+        numeric_keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+        for key in numeric_keys:
+            value = usage.get(key)
+            if isinstance(value, (int, float)):
+                try:
+                    self.usage_accumulated[key] = (
+                        float(self.usage_accumulated.get(key, 0) or 0)
+                        + float(value)
+                    )
+                except (TypeError, ValueError):
+                    pass
+        status = {
+            "last_request": dict(usage),
+            "accumulated": dict(self.usage_accumulated),
+            "remaining": None,
+        }
+        for key in ("remaining", "quota_remaining", "remaining_tokens",
+                    "remaining_neurons"):
+            if key in usage:
+                status["remaining"] = {
+                    key: usage[key],
+                }
+                break
+        self.usage_status = status
+        return status
+
     # -- headers ------------------------------------------------------------
     def _policy_id(self) -> str:
         host = (urlparse(self.base).hostname or "").lower()
@@ -426,7 +458,8 @@ class OpenAICompatLLM:
         return validate_provider(
             self._policy_id(),
             {"base_url": self.base, "model": self.model,
-             "account_id": getattr(self, "account_id", "")},
+             "account_id": getattr(self, "account_id", ""),
+             "cloudflare_plan": getattr(self, "cloudflare_plan", "unknown")},
         )
 
     def _body(self, messages: list[dict], tools: list[dict] | None,
@@ -466,7 +499,7 @@ class OpenAICompatLLM:
             raise _with_address(e, self.base) from None
 
         usage = data.get("usage") if isinstance(data, dict) else None
-        self.last_usage = dict(usage) if isinstance(usage, dict) else {}
+        self._record_usage(usage if isinstance(usage, dict) else {})
 
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
@@ -501,8 +534,8 @@ class OpenAICompatLLM:
                 data = r.json()
                 usage = data.get("usage") if isinstance(data, dict) else None
                 if isinstance(usage, dict):
-                    self.last_usage = dict(usage)
-                    yield {"usage": dict(usage)}
+                    status = self._record_usage(usage)
+                    yield {"usage": dict(status)}
                 msg = ((data.get("choices") or [{}])[0].get("message") or {})
                 if msg.get("content"):
                     yield {"text": msg["content"]}
@@ -529,8 +562,8 @@ class OpenAICompatLLM:
                         frame = json.loads(payload)
                         usage = frame.get("usage") if isinstance(frame, dict) else None
                         if isinstance(usage, dict):
-                            self.last_usage = dict(usage)
-                            yield {"usage": dict(usage)}
+                            status = self._record_usage(usage)
+                            yield {"usage": dict(status)}
                         delta = ((frame.get("choices") or [{}])[0]
                                  .get("delta") or {})
                     except Exception:
@@ -733,6 +766,10 @@ PROVIDER = {
         Field("account_id", "Cloudflare Account ID", kind="text", required=False,
               advanced=False,
               hint="32 hexadecimal characters; used only for the official Cloudflare endpoint"),
+        Field("cloudflare_plan", "Workers plan", kind="choice",
+              choices=("unknown", "free-confirmed"),
+              default="unknown", required=False,
+              hint="Choose free-confirmed only after confirming this account is on Workers Free"),
         Field("api_key", "API key", kind="secret", required=False,
               hint="Local servers usually need none"),
         # Filled in by TEST, not asked. The user is the wrong person to ask

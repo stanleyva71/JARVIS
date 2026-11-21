@@ -72,7 +72,8 @@ def classify_error(
         kind = ErrorKind.AUTHENTICATION
     elif "429" in low or "resource_exhausted" in low:
         kind = ErrorKind.QUOTA_EXHAUSTED if any(
-            token in low for token in ("quota", "resource_exhausted", "daily")
+            token in low for token in ("quota", "resource_exhausted", "daily",
+                                       "neuron", "free allocation", "limit")
         ) else ErrorKind.RATE_LIMITED
     elif any(token in low for token in ("timeout", "timed out", "deadline_exceeded")):
         kind = ErrorKind.TIMEOUT

@@ -3334,7 +3334,17 @@ class ProvidersOverlay(_HudOverlay):
                     pass
             usage = cfg.get("usage")
             if isinstance(usage, dict) and usage:
-                bits.append("Usage: " + str(usage)[:80])
+                last = usage.get("last_request", usage)
+                if isinstance(last, dict) and last:
+                    bits.append("Last request tokens: " + str(last)[:80])
+            accumulated = cfg.get("usage_accumulated")
+            if isinstance(accumulated, dict) and accumulated:
+                bits.append("Accumulated: " + str(accumulated)[:80])
+            remaining = usage.get("remaining") if isinstance(usage, dict) else None
+            if remaining:
+                bits.append("Remaining quota: " + str(remaining)[:80])
+            else:
+                bits.append("Remaining quota: unknown")
             lay.addWidget(self._label(" · ".join(bits), 7, C.TEXT_DIM))
             # If a list was already fetched, use it; if not, go and get one.
             if self._model_cache.get(sid):
@@ -3370,6 +3380,12 @@ class ProvidersOverlay(_HudOverlay):
         stored = dict(self._get_cfg(pid))
         entry = next((e for p, i, e, _ in self._catalog(slot)
                       if p == base and i == eid), {})
+        if eid == "cloudflare":
+            lay.addWidget(self._label(
+                "SAFETY: Cloudflare is disabled until you confirm the account is on "
+                "Workers Free. The app cannot verify billing or guarantee that a "
+                "Paid account or credits will not generate charges.",
+                7, C.ACC))
         is_local = entry.get("local") is True
         entry_values = entry.get("values") or {}
         # An entry that MENTIONS the address has answered it — including

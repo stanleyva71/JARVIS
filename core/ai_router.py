@@ -216,7 +216,11 @@ class AIRouter:
                     usage = event.get("usage") if isinstance(event, dict) else None
                     if usage and self._config_setter is not None:
                         try:
-                            self._config_setter(provider_id, {"usage": dict(usage)})
+                            accumulated = getattr(provider, "usage_accumulated", None)
+                            values = {"usage": dict(usage)}
+                            if isinstance(accumulated, dict):
+                                values["usage_accumulated"] = dict(accumulated)
+                            self._config_setter(provider_id, values)
                         except Exception:
                             pass
                     if event.get("text") or event.get("tool_calls"):
@@ -270,7 +274,11 @@ class AIRouter:
                 usage = getattr(provider, "last_usage", None)
                 if usage and self._config_setter is not None:
                     try:
-                        self._config_setter(provider_id, {"usage": dict(usage)})
+                        accumulated = getattr(provider, "usage_accumulated", None)
+                        values = {"usage": dict(usage)}
+                        if isinstance(accumulated, dict):
+                            values["usage_accumulated"] = dict(accumulated)
+                        self._config_setter(provider_id, values)
                     except Exception:
                         pass
                 return text, calls

@@ -643,31 +643,49 @@ def test_ai_policy_and_errors():
                "model": "openrouter/free"},
           ).free_only)
     account_id = "0123456789abcdef0123456789abcdef"
-    check("Cloudflare official account endpoint is allowed",
+    check("Cloudflare official account endpoint is allowed only after free confirmation",
           validate_provider(
               "openai_compat@cloudflare",
               {"base_url":
                f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
                "account_id": account_id,
-               "model": "@cf/meta/llama-3.1-8b-instruct"},
+               "cloudflare_plan": "free-confirmed",
+               "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"},
           ).free_only)
+    check("Cloudflare is blocked while account status is unknown",
+          blocked("openai_compat@cloudflare",
+                  {"base_url":
+                   f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+                   "account_id": account_id,
+                   "cloudflare_plan": "unknown",
+                   "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"}))
+    check("Cloudflare deprecated model is blocked",
+          blocked("openai_compat@cloudflare",
+                  {"base_url":
+                   f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+                   "account_id": account_id,
+                   "cloudflare_plan": "free-confirmed",
+                   "model": "@cf/qwen/qwen3-30b-a3b-fp8"}))
     check("Cloudflare fake account ID is blocked",
           blocked("openai_compat@cloudflare",
                   {"base_url":
                    f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
                    "account_id": "short",
-                   "model": "@cf/meta/llama-3.1-8b-instruct"}))
+                   "cloudflare_plan": "free-confirmed",
+                   "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"}))
     check("Cloudflare account endpoint mismatch is blocked",
           blocked("openai_compat@cloudflare",
                   {"base_url":
                    "https://api.cloudflare.com/client/v4/accounts/1234/ai/v1",
                    "account_id": account_id,
-                   "model": "@cf/meta/llama-3.1-8b-instruct"}))
+                   "cloudflare_plan": "free-confirmed",
+                   "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"}))
     check("Cloudflare unknown model is blocked",
           blocked("openai_compat@cloudflare",
                   {"base_url":
                    f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
                    "account_id": account_id,
+                   "cloudflare_plan": "free-confirmed",
                    "model": "@cf/openai/gpt-4o-unknown"}))
     check("Groq approved free model is allowed",
           validate_provider(
@@ -785,6 +803,36 @@ def test_ai_policy_and_errors():
     check("credentials are redacted from log text",
           all(value not in safe for value in ("SECRET", "TOKEN", "BEARER")))
 
+    from providers.llm_openai import OpenAICompatLLM
+    usage_llm = OpenAICompatLLM({
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "qwen3:8b",
+    })
+    first = usage_llm._record_usage({
+        "prompt_tokens": 12,
+        "completion_tokens": 5,
+        "total_tokens": 17,
+    })
+    second = usage_llm._record_usage({
+        "prompt_tokens": 8,
+        "completion_tokens": 4,
+        "total_tokens": 12,
+    })
+    check("last request and accumulated usage stay separate",
+          first["last_request"]["total_tokens"] == 17
+          and second["last_request"]["total_tokens"] == 12
+          and usage_llm.usage_accumulated["total_tokens"] == 29)
+    check("unknown remaining quota is not estimated",
+          second["remaining"] is None)
+    remaining = usage_llm._record_usage({
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "remaining_neurons": 4321,
+    })
+    check("official remaining quota is displayed only from API data",
+          remaining["remaining"] == {"remaining_neurons": 4321})
+
 
 async def test_ai_router_fallback():
     from core.ai_router import AIRouter
@@ -833,12 +881,21 @@ async def test_ai_router_fallback():
             return {"base_url": "https://openrouter.ai/api/v1",
                     "model": "meta-llama/llama-3.1-8b-instruct:free",
                     "api_key": "sk-test"}
+        if "cloudflare" in provider_id:
+            account_id = "0123456789abcdef0123456789abcdef"
+            return {"base_url":
+                    f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+                    "account_id": account_id,
+                    "cloudflare_plan": "free-confirmed",
+                    "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                    "api_key": "cf-test"}
         return {"base_url": "https://api.openai.com/v1",
                 "model": "gpt-4o", "api_key": "sk-paid"}
 
     primary = "openai_compat@groq"
     ollama = "openai_compat@ollama"
     openrouter = "openai_compat@openrouter"
+    cloudflare = "openai_compat@cloudflare"
 
     def collect(router, *, tools=None, messages=None):
         async def run():
@@ -949,6 +1006,22 @@ async def test_ai_router_fallback():
     await collect(router)
     check("cooldown skips an unavailable provider",
           cooled and calls == [ollama])
+
+    calls.clear()
+    quota_router = AIRouter(
+        cloudflare,
+        (ollama,),
+        config_getter=config_getter,
+        builder=lambda pid, cfg: FakeLLM(
+            pid,
+            [{"text": "free fallback answer"}] if pid == ollama else [],
+            RuntimeError("429 daily free allocation exhausted")
+            if pid == cloudflare else None),
+    )
+    quota_events = await collect(quota_router)
+    check("fallback after Cloudflare free quota exhaustion",
+          quota_events == [{"text": "free fallback answer"}
+                           ] and calls == [cloudflare, ollama])
 
     calls.clear()
     router = AIRouter(primary, (openrouter,),

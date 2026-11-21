@@ -51,10 +51,8 @@ _GROQ_FREE_MODELS = {
 # chat API and do not require a separate paid model purchase. This is deliberately
 # conservative: unknown/new Workers AI models stay blocked by default.
 _CLOUDFLARE_FREE_CHAT_MODELS = {
-    "@cf/meta/llama-3.1-8b-instruct",
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     "@cf/qwen/qwen2.5-coder-32b-instruct",
-    "@cf/qwen/qwen3-30b-a3b-fp8",
 }
 
 _CLOUDFLARE_ACCOUNT_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -194,6 +192,12 @@ def validate_provider(provider_id: str, cfg: dict,
         account_id = validate_cloudflare_account_id(
             (cfg or {}).get("account_id")
         )
+        plan = str((cfg or {}).get("cloudflare_plan") or "").strip().lower()
+        if plan != "free-confirmed":
+            raise PolicyViolation(
+                "Cloudflare is blocked until the account is manually confirmed "
+                "as Workers Free. Paid or unknown accounts may generate charges."
+            )
         expected_path = f"/client/v4/accounts/{account_id}/ai/v1"
         if not _is_official_https(
             url,
