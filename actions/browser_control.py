@@ -951,9 +951,19 @@ class _BrowserSession:
         try:
             save_path = path or str(Path.home() / "Desktop" / "jarvis_screenshot.png")
             await page.screenshot(path=save_path, full_page=False)
-            return f"Screenshot saved: {save_path}"
+            saved = Path(save_path)
+            if saved.is_file() and saved.stat().st_size > 0:
+                return outcome.done(
+                    "screenshot", path=str(saved),
+                    size_bytes=saved.stat().st_size,
+                )
+            return outcome.failed(
+                "screenshot",
+                "the browser screenshot call returned but no usable file was created",
+                path=str(saved),
+            )
         except Exception as e:
-            return f"Screenshot error: {e}"
+            return outcome.failed("screenshot", f"could not capture the browser page: {e}")
 
     async def back(self) -> str:
         page = await self._get_page()

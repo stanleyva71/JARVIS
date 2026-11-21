@@ -208,8 +208,17 @@ def _click(x=None, y=None, button: str = "left", clicks: int = 1) -> str:
 
 def _hotkey(*keys) -> str:
     _require_pyautogui()
-    pyautogui.hotkey(*keys)
-    return f"Hotkey: {'+'.join(keys)}"
+    normalized = []
+    os_name = _get_os()
+    for key in keys:
+        k = str(key).strip().lower().replace(" ", "_")
+        if k in ("win", "windows", "super", "meta"):
+            k = "winleft" if os_name == "windows" else k
+        elif k in ("print_screen", "printscreen", "prtsc", "prt_scr"):
+            k = "printscreen"
+        normalized.append(k)
+    pyautogui.hotkey(*normalized)
+    return f"Hotkey: {'+'.join(normalized)}"
 
 
 def _press(key: str) -> str:
@@ -261,9 +270,20 @@ def _clipboard_paste(text: str) -> str:
 def _screenshot(save_path: str | None = None) -> str:
     _require_pyautogui()
     path = _safe_screenshot_path(save_path)
-    img  = pyautogui.screenshot()
-    img.save(str(path))
-    return f"Screenshot saved: {path}"
+    try:
+        img = pyautogui.screenshot()
+        img.save(str(path))
+        if path.is_file() and path.stat().st_size > 0:
+            return outcome.done(
+                "screenshot", path=str(path),
+                size_bytes=path.stat().st_size,
+            )
+        return outcome.failed(
+            "screenshot", "the screenshot call returned but no usable file was created",
+            path=str(path),
+        )
+    except Exception as exc:
+        return outcome.failed("screenshot", f"could not capture the screen: {exc}")
 
 
 def _clear_field() -> str:

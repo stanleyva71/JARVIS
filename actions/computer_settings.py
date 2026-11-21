@@ -498,15 +498,32 @@ def type_text(text: str, press_enter_after: bool = False):
 
 def take_screenshot():
     if _OS == "Windows":
-        pyautogui.hotkey("win", "shift", "s")
-    elif _OS == "Darwin":
+        try:
+            path = Path.home() / "Desktop" / "jarvis_screenshot.png"
+            img = pyautogui.screenshot()
+            img.save(str(path))
+            if path.is_file() and path.stat().st_size > 0:
+                return outcome.done("screenshot", path=str(path),
+                                    size_bytes=path.stat().st_size)
+            return outcome.failed("screenshot", "no usable screenshot file was created",
+                                  path=str(path))
+        except Exception as exc:
+            return outcome.failed("screenshot", f"could not capture the full screen: {exc}")
+    if _OS == "Darwin":
         pyautogui.hotkey("command", "shift", "3")
+        return outcome.unverified("screenshot", "macOS captured a system shortcut but did not expose a verifiable file")
     else:
         for cmd in [["scrot"], ["gnome-screenshot"], ["import", "-window", "root", "screenshot.png"]]:
             if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
-                subprocess.Popen(cmd)
-                return
-        pyautogui.hotkey("ctrl", "print_screen")
+                proc = subprocess.Popen(cmd)
+                proc.wait(timeout=5)
+                path = Path("screenshot.png")
+                if path.is_file() and path.stat().st_size > 0:
+                    return outcome.done("screenshot", path=str(path.resolve()),
+                                        size_bytes=path.stat().st_size)
+                return outcome.failed("screenshot", "the screenshot command produced no usable file",
+                                      path=str(path.resolve()))
+        return outcome.failed("screenshot", "no supported full-screen screenshot tool is installed")
 
 def lock_screen():
     if _OS == "Windows":

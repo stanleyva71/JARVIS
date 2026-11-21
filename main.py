@@ -304,9 +304,10 @@ def _describe_limits(has_vision: bool, has_mic: bool) -> str:
 
     if has_vision:
         out.append(
-            "- Your sight is not continuous. You see nothing until you call a "
-            "vision tool, and then only that single frame at that moment — you "
-            "cannot watch, monitor or notice something changing on screen.")
+            "- Use screen_process for vision. In Gemini Live, angle='screen' "
+            "keeps a live screen stream active and angle='camera' keeps the "
+            "webcam active; in a local text/pipeline engine, vision is limited "
+            "to a single captured frame.")
     else:
         out.append("- You have no sight at all in this build.")
     if has_mic:
@@ -357,10 +358,37 @@ def _is_repeat_chunk(txt: str, buf: list) -> bool:
     Guards against the API re-sending the tail of a response across the several
     turn_completes a tool-using turn produces.
     """
+    txt = _clean_transcript(txt)
+    if not txt:
+        return True
+
+    joined = " ".join(part for part in buf if part).strip()
+    if not joined:
+        return False
+
+    # Live transcripts can arrive either as incremental phrases or as the
+    # complete text accumulated so far.  Handling only exact membership misses
+    # the latter and duplicates cumulative tails in the activity log.
+    if txt in joined:
+        return True
+    if joined in txt:
+        # The API sent a longer cumulative update.  Replace the old pieces so
+        # the assembled turn contains each word only once.
+        buf[:] = [txt]
+        return True
+
+    # Short chunks such as "evet, evet" are legitimate speech and must not be
+    # classified as a duplicate.
     if len(txt) < _REPEAT_MIN:
-        return bool(buf) and txt == buf[-1]
-    joined = " ".join(buf)
-    return txt in joined
+        return False
+
+    # The API can resend only the overlap at a chunk boundary.  Do not append
+    # that overlap as a second copy of the same phrase.
+    limit = min(len(txt), len(joined))
+    for size in range(limit, 3, -1):
+        if joined.endswith(txt[:size]):
+            return True
+    return False
 
 def _clean_transcript(text: str) -> str:    
     text = _CTRL_RE.sub("", text)
@@ -393,8 +421,10 @@ TOOL_DECLARATIONS = [
             "MUST be called when user asks what is on screen, what you see, "
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
-            "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
+            "After the image is captured it is sent directly to you. angle='screen' "
+            "keeps sending live screen frames for real-time observation until "
+            "close_camera is called. angle='camera' keeps the webcam stream open "
+            "until close_camera is called."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -408,9 +438,9 @@ TOOL_DECLARATIONS = [
     {
         "name": "close_camera",
         "description": (
-            "Closes the live camera view shown on screen. "
+            "Closes the live camera or screen view. "
             "Call when the user says (in ANY language): close camera, stop camera, "
-            "turn off camera, that's creepy, etc."
+            "stop watching the screen, close vision, that's creepy, etc."
         ),
         "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
@@ -592,6 +622,8 @@ class JarvisLive:
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
+        self._vision_screen_active = False   # True while live screen frames are being sent
+        self._screen_stream_task   = None    # asyncio task that sends periodic screen frames
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
@@ -1404,6 +1436,7 @@ class JarvisLive:
                     else:
                         img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
                         print(f"[Vision] 🖥️  Screen: {len(img_b):,} bytes")
+                        self.ui.start_screen_stream()
                         _stall = "screen"
                     self._pending_vision = (img_b, mime_t, user_text, angle)
                     # The image is attached to this same exchange, so there is
@@ -1419,8 +1452,12 @@ class JarvisLive:
                     )
 
             elif name == "close_camera":
+                if self._screen_stream_task:
+                    self._screen_stream_task.cancel()
+                    self._screen_stream_task = None
+                self._vision_screen_active = False
                 self.ui.stop_camera_stream()
-                result = "Camera closed."
+                result = "Live camera and screen vision closed."
 
             elif name == "system_status":
                 r = await loop.run_in_executor(None, get_system_status)
@@ -1707,7 +1744,34 @@ class JarvisLive:
             self._vision_close_pending = True
         else:
             self._vision_busy = False
+
+        if angle == "screen" and self._engine_caps is None:
+            self._vision_screen_active = True
+            if self._screen_stream_task:
+                self._screen_stream_task.cancel()
+            self._screen_stream_task = asyncio.create_task(self._stream_screen())
+            print("[Vision] 📡 Live screen stream started")
+        elif angle == "screen":
+            print("[Vision] ⚠️ Live screen streaming is unavailable in local pipeline mode")
         return True
+
+    async def _stream_screen(self) -> None:
+        """Send compressed screen frames to Gemini Live at a low, useful rate."""
+        while self._vision_screen_active and self.session:
+            try:
+                loop = asyncio.get_event_loop()
+                img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
+                if not self._vision_screen_active:
+                    break
+                await self.session.send_realtime_input(
+                    video=types.Blob(data=img_b, mime_type=mime_t)
+                )
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[Vision] ⚠️ Live screen frame failed: {exc}")
+                await asyncio.sleep(2.0)
 
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
@@ -1805,7 +1869,13 @@ class JarvisLive:
                             # into a *fresh* buffer after a flush, never log the
                             # same answer (or a tail of it) twice in a row.
                             if full_out and len(full_out) >= _REPEAT_MIN and self._last_out_logged:
-                                if full_out in self._last_out_logged:
+                                previous = " ".join(self._last_out_logged.split())
+                                current = " ".join(full_out.split())
+                                if (
+                                    current == previous
+                                    or current in previous
+                                    or previous in current
+                                ):
                                     full_out = ""
                             if full_out:
                                 self._last_out_logged = full_out
@@ -2514,6 +2584,10 @@ class JarvisLive:
                     # Reset transient state that must not carry over from a previous session
                     self._pending_vision       = None
                     self._vision_cam_active    = False
+                    if self._screen_stream_task:
+                        self._screen_stream_task.cancel()
+                        self._screen_stream_task = None
+                    self._vision_screen_active = False
                     self._vision_close_pending = False
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0

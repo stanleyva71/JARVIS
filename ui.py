@@ -4802,6 +4802,33 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=self._cam_loop, daemon=True, name="cam-stream")
         t.start()
 
+    def start_screen_stream(self) -> None:
+        """Show live screen captures in the same HUD panel as webcam frames."""
+        self._cam_stop.clear()
+        self._cam_stream_sig.emit(True)
+        t = threading.Thread(target=self._screen_loop, daemon=True, name="screen-stream")
+        t.start()
+
+    def _screen_loop(self) -> None:
+        try:
+            import io
+            import mss
+            from PIL import Image
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                while not self._cam_stop.wait(0.25):
+                    shot = sct.grab(monitor)
+                    rgb = bytes(shot.rgb)
+                    img = Image.frombytes("RGB", shot.size, rgb)
+                    img.thumbnail((1280, 720), Image.Resampling.BILINEAR)
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=65)
+                    self._cam_frame_sig.emit(buf.getvalue())
+        except Exception as exc:
+            print(f"[Screen] Stream error: {exc}")
+        finally:
+            self._cam_stream_sig.emit(False)
+
     def _cam_loop(self) -> None:
         try:
             import cv2
@@ -4837,6 +4864,7 @@ class MainWindow(QMainWindow):
             self._cam_stream_sig.emit(False)
 
     def stop_camera_stream(self) -> None:
+        """Stop either webcam or live screen preview."""
         self._cam_stop.set()
 
     # --- Video in the HUD area ---------------------------------------------
@@ -7534,6 +7562,10 @@ class JarvisUI:
     def start_camera_stream(self) -> None:
         """Thread-safe: start live camera feed in the full HUD area."""
         self._win.start_camera_stream()
+
+    def start_screen_stream(self) -> None:
+        """Thread-safe: start live screen preview in the full HUD area."""
+        self._win.start_screen_stream()
 
     def stop_camera_stream(self) -> None:
         """Thread-safe: stop the live camera feed."""
