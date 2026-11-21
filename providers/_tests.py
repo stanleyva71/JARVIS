@@ -1046,6 +1046,34 @@ async def test_ai_router_fallback():
           not no_vision_router.ensure_vision_known()
           and no_vision_router.caps.get("vision") is False)
 
+    persisted_vision: dict[str, dict] = {}
+    class VisionProbeLLM:
+        def __init__(self, pid):
+            self.pid = pid
+            self.caps = {"vision": False, "tools": True, "tool_format": "openai"}
+        def ensure_vision_known(self, save=None):
+            self.caps["vision"] = True
+            if save:
+                save({"vision": "1", "vision_model": f"{self.pid}-vision-model"})
+            return True
+
+    separated_router = AIRouter(
+        primary,
+        (ollama,),
+        config_getter=config_getter,
+        config_setter=lambda pid, values:
+            persisted_vision.setdefault(pid, {}).update(values),
+        preference_getter=lambda profile:
+            ollama if profile == "vision" else "",
+        builder=lambda pid, cfg: VisionProbeLLM(pid),
+    )
+    check("alternate vision probe persists only to the alternate provider",
+          separated_router.ensure_vision_known()
+          and ollama in persisted_vision
+          and persisted_vision[ollama].get("vision") == "1"
+          and persisted_vision[ollama].get("vision_model") == f"{ollama}-vision-model"
+          and primary not in persisted_vision)
+
     calls.clear()
     disabled_router = AIRouter(
         ollama,
@@ -1963,6 +1991,30 @@ def test_task_router_profiles_and_persistence():
               {"role": "assistant", "content": "I described the image"},
               {"role": "user", "content": "now explain the plan"},
           ]) == "reasoning")
+    check("reasoning works while web_search is available",
+          classify_task_profile(
+              [{"role": "user", "content": "analyze the tradeoffs and plan a strategy"}],
+              [{"name": "web_search"}],
+          ) == "reasoning")
+    check("explicit web search stays grounded without generic reasoning",
+          classify_task_profile(
+              [{"role": "user", "content": "search the web for current sources"}],
+              [{"name": "web_search"}],
+          ) == "conversation")
+    check("Portuguese coding markers are recognized",
+          classify_task_profile([{"role": "user",
+                                  "content": "programacao: corrigir esta funcao"}]
+                                ) == "coding")
+    check("Portuguese reasoning markers are recognized",
+          classify_task_profile([{"role": "user",
+                                  "content": "analise e compare; planeje uma estrategia"}]
+                                ) == "reasoning")
+    check("decode is not Portuguese or English coding",
+          classify_task_profile([{"role": "user", "content": "decode this word"}]
+                                ) == "conversation")
+    check("planeta is not reasoning",
+          classify_task_profile([{"role": "user", "content": "conte sobre o planeta marte"}]
+                                ) == "conversation")
     check("coding profile is conservative",
           classify_task_profile([{"role": "user",
                                   "content": "debug this Python traceback and refactor the function"}]

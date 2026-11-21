@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+import re
+import unicodedata
 from typing import Any, AsyncIterator, Callable
 
 from core.ai_errors import ErrorKind, classify_error
@@ -9,6 +11,25 @@ from core.ai_policy import validate_provider
 
 
 TASK_PROFILES = ("conversation", "reasoning", "coding", "vision")
+
+
+def _normalize_task_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or ""))
+    normalized = "".join(
+        char for char in normalized
+        if not unicodedata.combining(char)
+    )
+    return " ".join(normalized.lower().strip().split())
+
+
+def _contains_marker(text: str, marker: str) -> bool:
+    """Match whole words or explicit phrases after accent normalization."""
+    marker = _normalize_task_text(marker)
+    if not marker:
+        return False
+    if " " in marker:
+        return marker in f" {text} "
+    return re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text) is not None
 
 
 def classify_task_profile(messages: list[dict] | None = None,
@@ -26,16 +47,6 @@ def classify_task_profile(messages: list[dict] | None = None,
     if has_image:
         return "vision"
 
-    tool_names: set[str] = set()
-    for tool in tools or []:
-        if not isinstance(tool, dict):
-            continue
-        name = str(tool.get("name") or "").lower()
-        function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
-        name = name or str(function.get("name") or "").lower()
-        if name:
-            tool_names.add(name)
-
     text = ""
     if current:
         content = current[0].get("content")
@@ -47,31 +58,31 @@ def classify_task_profile(messages: list[dict] | None = None,
                 for part in content
                 if isinstance(part, dict)
             )
-    text = text.lower()
+    text = _normalize_task_text(text)
 
     coding_markers = (
-        "python", "javascript", "typescript", "c#", "golang", " rust ",
-        "java ", "code", "source code", "bug", "debug", "traceback",
+        "python", "javascript", "typescript", "golang", "rust",
+        "java", "code", "source code", "bug", "debug", "traceback",
         "stack trace", "exception", "compile", "compiler", "refactor",
-        "implement", "function", "class ", "programming", "git ",
+        "implement", "function", "class", "programming", "git",
         "pull request", "syntax", "dependency", "unit test",
         "write a script", "fix this", "patch",
+        "programacao", "codigo", "corrigir", "corrige", "corrija",
+        "depurar", "depure", "funcao", "implementacao", "refatorar",
     )
-    for marker in coding_markers:
-        if marker in f" {text} ":
-            return "coding"
+    if any(_contains_marker(text, marker) for marker in coding_markers):
+        return "coding"
 
     reasoning_markers = (
         "reason", "prove", "derive", "plan", "planning", "strategy",
         "analyze", "analyse", "analysis", "compare", "evaluation",
-        "trade-off", "tradeoff", "architect", "step by step",
+        "tradeoff", "architect", "step by step",
         "complex problem", "decision", "hypothesis",
+        "raciocinio", "analisar", "analise", "comparar", "planejar",
+        "planejamento", "estrategia", "decisao", "hipotese",
     )
-    research_tools = {"web_search", "google_search", "grounding"}
-    if not (tool_names & research_tools):
-        for marker in reasoning_markers:
-            if marker in text:
-                return "reasoning"
+    if any(_contains_marker(text, marker) for marker in reasoning_markers):
+        return "reasoning"
 
     return "conversation"
 
@@ -295,7 +306,7 @@ class AIRouter:
                     seen = bool(caps.get("vision"))
                 else:
                     provider_save = None
-                    if save is not None:
+                    if provider_id == self.primary_id and save is not None:
                         def provider_save(v, _pid=provider_id):
                             try:
                                 save(v)
