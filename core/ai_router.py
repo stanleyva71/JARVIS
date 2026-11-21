@@ -14,7 +14,15 @@ TASK_PROFILES = ("conversation", "reasoning", "coding", "vision")
 def classify_task_profile(messages: list[dict] | None = None,
                           tools: list[dict] | None = None) -> str:
     """Deterministically classify a task without making any model call."""
-    has_image = AIRouter._requires_vision(messages or [])
+    current = []
+    if messages:
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() in {"user", ""}:
+                current = [message]
+                break
+    has_image = AIRouter._requires_vision(current)
     if has_image:
         return "vision"
 
@@ -28,18 +36,18 @@ def classify_task_profile(messages: list[dict] | None = None,
         if name:
             tool_names.add(name)
 
-    text_parts: list[str] = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
+    text = ""
+    if current:
+        content = current[0].get("content")
         if isinstance(content, str):
-            text_parts.append(content)
+            text = content
         elif isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    text_parts.append(part["text"])
-    text = " ".join(text_parts).lower()
+            text = " ".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict)
+            )
+    text = text.lower()
 
     coding_markers = (
         "python", "javascript", "typescript", "c#", "golang", " rust ",
@@ -54,7 +62,7 @@ def classify_task_profile(messages: list[dict] | None = None,
             return "coding"
 
     reasoning_markers = (
-        "reason", "prove", "derive", "plan ", "planning", "strategy",
+        "reason", "prove", "derive", "plan", "planning", "strategy",
         "analyze", "analyse", "analysis", "compare", "evaluation",
         "trade-off", "tradeoff", "architect", "step by step",
         "complex problem", "decision", "hypothesis",
@@ -138,6 +146,21 @@ class AIRouter:
         from memory.config_manager import get_provider_config
         return get_provider_config(provider_id)
 
+    def _provider_disabled(self, provider_id: str) -> bool:
+        cfg = self._config(provider_id)
+        if "enabled" not in cfg:
+            return False
+        value = cfg.get("enabled")
+        if value is False:
+            return True
+        if value is True:
+            return False
+        if value is None:
+            return True
+        return str(value).strip().lower() in {
+            "0", "false", "no", "off", "disabled", "none",
+        }
+
     def _build(self, provider_id: str) -> Any:
         cfg = self._config(provider_id)
         decl = None
@@ -205,7 +228,18 @@ class AIRouter:
 
     @staticmethod
     def _requires_vision(messages: list[dict]) -> bool:
-        for message in messages or []:
+        current = None
+        if messages:
+            for message in reversed(messages):
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "").strip().lower()
+                if role in {"user", ""}:
+                    current = message
+                    break
+        if current is None:
+            return False
+        for message in (current,):
             content = message.get("content") if isinstance(message, dict) else None
             if isinstance(content, list):
                 for part in content:
@@ -246,22 +280,53 @@ class AIRouter:
         return caps
 
     def ensure_vision_known(self, save=None) -> bool:
-        provider_id = self._ordered_ids("vision")[0]
-        try:
-            provider = self._build(provider_id)
-            self._copy_primary_caps(provider)
-            check = getattr(provider, "ensure_vision_known", None)
-            if check is None:
-                seen = bool(self._provider_caps(provider).get("vision"))
-            else:
-                seen = bool(check(save))
-            self.caps["vision"] = seen
-            provider.caps = dict(self._provider_caps(provider))
-            provider.caps["vision"] = seen
-            return seen
-        except Exception:
-            self.caps["vision"] = False
-            return False
+        attempted: set[str] = set()
+        for provider_id in self._ordered_ids("vision"):
+            if provider_id in attempted:
+                continue
+            attempted.add(provider_id)
+            if self._provider_disabled(provider_id) or self._cooling(provider_id):
+                continue
+            try:
+                provider = self._build(provider_id)
+                caps = self._provider_caps(provider)
+                check = getattr(provider, "ensure_vision_known", None)
+                if check is None:
+                    seen = bool(caps.get("vision"))
+                else:
+                    provider_save = None
+                    if save is not None:
+                        def provider_save(v, _pid=provider_id):
+                            try:
+                                save(v)
+                            except Exception:
+                                pass
+                            if self._config_setter is not None:
+                                try:
+                                    self._config_setter(_pid, v)
+                                except Exception:
+                                    pass
+                    elif self._config_setter is not None:
+                        def provider_save(v, _pid=provider_id):
+                            try:
+                                self._config_setter(_pid, v)
+                            except Exception:
+                                pass
+                    seen = bool(check(provider_save))
+                    caps = self._provider_caps(provider)
+                    seen = seen and bool(caps.get("vision", seen))
+                if seen:
+                    self._copy_primary_caps(provider)
+                    self.caps["vision"] = True
+                    provider.caps = dict(caps)
+                    provider.caps["vision"] = True
+                    self.last_selected_provider = provider_id
+                    return True
+            except Exception:
+                continue
+        self.caps["vision"] = False
+        self.last_selected_provider = ""
+        return False
 
     async def chat(
         self,
@@ -282,8 +347,7 @@ class AIRouter:
             if provider_id in attempted or self._cooling(provider_id):
                 continue
             attempted.add(provider_id)
-            cfg = self._config(provider_id)
-            if str(cfg.get("enabled") or "1").strip().lower() in {"0", "false", "off", "disabled"}:
+            if self._provider_disabled(provider_id):
                 continue
 
             try:
@@ -353,8 +417,7 @@ class AIRouter:
             if provider_id in attempted or self._cooling(provider_id):
                 continue
             attempted.add(provider_id)
-            cfg = self._config(provider_id)
-            if str(cfg.get("enabled") or "1").strip().lower() in {"0", "false", "off", "disabled"}:
+            if self._provider_disabled(provider_id):
                 continue
             try:
                 provider = self._build(provider_id)

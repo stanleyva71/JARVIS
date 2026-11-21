@@ -1014,6 +1014,38 @@ async def test_ai_router_fallback():
           calls == [primary]
           and fallback_events == [{"text": "primary fallback answer"}])
 
+    class NoVisionLLM:
+        caps = {"vision": False, "tools": True, "tool_format": "openai"}
+
+    class VisionLLM:
+        caps = {"vision": True, "tools": True, "tool_format": "openai"}
+
+    calls.clear()
+    vision_router = AIRouter(
+        primary,
+        (ollama,),
+        config_getter=config_getter,
+        preference_getter=lambda profile:
+            ollama if profile == "vision" else "",
+        builder=lambda pid, cfg:
+            VisionLLM() if pid == primary else NoVisionLLM(),
+    )
+    check("Vision preference falls back to a provider with vision",
+          vision_router.ensure_vision_known()
+          and vision_router.last_selected_provider == primary
+          and vision_router.caps.get("vision") is True)
+
+    calls.clear()
+    no_vision_router = AIRouter(
+        ollama,
+        (),
+        config_getter=config_getter,
+        builder=lambda pid, cfg: NoVisionLLM(),
+    )
+    check("no provider with confirmed vision returns false",
+          not no_vision_router.ensure_vision_known()
+          and no_vision_router.caps.get("vision") is False)
+
     calls.clear()
     disabled_router = AIRouter(
         ollama,
@@ -1031,6 +1063,42 @@ async def test_ai_router_fallback():
         disabled_failed = True
     check("disabled provider is never called",
           disabled_failed and calls == [])
+
+    calls.clear()
+    disabled_bool_router = AIRouter(
+        ollama,
+        (),
+        config_getter=lambda pid: {
+            **config_getter(pid),
+            "enabled": False,
+        },
+        builder=lambda pid, cfg: FakeLLM(pid),
+    )
+    try:
+        await collect(disabled_bool_router)
+        disabled_bool_failed = False
+    except RuntimeError:
+        disabled_bool_failed = True
+    check("enabled=False boolean is never called",
+          disabled_bool_failed and calls == [])
+
+    calls.clear()
+    disabled_text_router = AIRouter(
+        ollama,
+        (),
+        config_getter=lambda pid: {
+            **config_getter(pid),
+            "enabled": "FALSE",
+        },
+        builder=lambda pid, cfg: FakeLLM(pid),
+    )
+    try:
+        await collect(disabled_text_router)
+        disabled_text_failed = False
+    except RuntimeError:
+        disabled_text_failed = True
+    check("enabled=false text is never called",
+          disabled_text_failed and calls == [])
 
     calls.clear()
     persisted: dict[str, dict] = {}
@@ -1870,6 +1938,31 @@ def test_task_router_profiles_and_persistence():
     check("conversation profile is the default",
           classify_task_profile([{"role": "user", "content": "hello, how are you?"}]
                                 ) == "conversation")
+    check("system prompt markers do not change conversation",
+          classify_task_profile([
+              {"role": "system",
+               "content": "reason carefully; if bug, write code using function"},
+              {"role": "user", "content": "hello, how are you today"},
+          ]) == "conversation")
+    check("old coding history does not affect a common question",
+          classify_task_profile([
+              {"role": "user", "content": "debug this Python traceback"},
+              {"role": "assistant", "content": "I refactored the function"},
+              {"role": "user", "content": "what is the weather today"},
+          ]) == "conversation")
+    check("current coding request overrides earlier conversation",
+          classify_task_profile([
+              {"role": "assistant", "content": "hello"},
+              {"role": "user", "content": "please refactor this Python function"},
+          ]) == "coding")
+    check("old image does not classify a later text request",
+          classify_task_profile([
+              {"role": "user", "content": [
+                  {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+              ]},
+              {"role": "assistant", "content": "I described the image"},
+              {"role": "user", "content": "now explain the plan"},
+          ]) == "reasoning")
     check("coding profile is conservative",
           classify_task_profile([{"role": "user",
                                   "content": "debug this Python traceback and refactor the function"}]
