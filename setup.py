@@ -9,8 +9,8 @@ Playwright browsers needed for web automation (current-OS builds only).
 Two things it deliberately does NOT install:
   * the optional local wake word ("Hey Jarvis") — one-click, opt-in, from
     ⚙ → WAKE WORD inside the app;
-  * anything for the avatar — the holographic head renders in software on the
-    PyQt6 and numpy already listed here. No GPU, no OpenGL, no extra packages.
+  * optional systems outside requirements.txt. The QPainter hologram remains
+    GPU-independent; Chloe 3D uses the OpenGL and GLB parser dependencies below.
 """
 import platform
 import subprocess

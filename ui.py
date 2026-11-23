@@ -63,6 +63,12 @@ try:
 except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
 
+try:
+    from core.chloe_gl import ChloeGLWidget
+except Exception as _chloe_import_error:  # pragma: no cover - optional renderer
+    ChloeGLWidget = None
+    print(f"[Chloe] 3D renderer unavailable ({_chloe_import_error})", flush=True)
+
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -965,6 +971,38 @@ class HudCanvas(QWidget):
             p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
 
         p.end()   # end deterministically so the backing store never flushes an active painter
+
+class ChloePage(QWidget):
+    """Isolated 3D page; its OpenGL surface never overlaps the QPainter HUD."""
+
+    def __init__(self, model_path: Path, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background: {C.BG};")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.status = QLabel("◈  CHLOE 3D · INITIALIZING")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL}; border-bottom: 1px solid {C.BORDER};"
+            "padding: 6px; font: bold 9pt 'Courier New';"
+        )
+        layout.addWidget(self.status)
+        if ChloeGLWidget is None:
+            self.viewport = None
+            self.status.setText("CHLOE 3D · RENDERER UNAVAILABLE — QPAINTER HUD IS AVAILABLE")
+            self.status.setStyleSheet(
+                f"color: {C.ACC}; background: {C.PANEL}; padding: 6px; font: bold 9pt 'Courier New';"
+            )
+        else:
+            self.viewport = ChloeGLWidget(model_path, self)
+            layout.addWidget(self.viewport, stretch=1)
+            self.viewport.ready_changed.connect(self._render_state)
+
+    def _render_state(self, ready: bool, error: str) -> None:
+        self.status.setText("◈  CHLOE 3D · IDLE" if ready
+                            else "CHLOE 3D · FAILED — RETURNING TO HOLOGRAM")
+
 
 class MetricBar(QWidget):
 
@@ -4743,6 +4781,10 @@ class MainWindow(QMainWindow):
 
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = HudCanvas(face_path, _display)
+        # Always boot with the working software HUD. Enter the optional GL
+        # viewport only after the user selects Chloe from the HUD toggle.
+        if self.hud.hud_style == "chloe":
+            self.hud.hud_style = "face"
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._content_panel = self._build_content_panel()
         self._quiz_panel = self._build_quiz_panel()
@@ -4900,6 +4942,7 @@ class MainWindow(QMainWindow):
 
         # Stack: 0 = animated HUD, 1 = live camera, 2 = video
         self._hud_cam_stack = QStackedWidget()
+        self._chloe_page = None
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
         self._hud_cam_stack.addWidget(self._video_cont)
@@ -5001,11 +5044,66 @@ class MainWindow(QMainWindow):
         )
 
     # --- Live camera stream in HUD area ------------------------------------
+    def _ensure_chloe_page(self) -> bool:
+        if (self._chloe_page is not None and self._chloe_page.viewport is not None
+                and self._chloe_page.viewport.failure):
+            self._hud_cam_stack.removeWidget(self._chloe_page)
+            self._chloe_page.deleteLater()
+            self._chloe_page = None
+        if self._chloe_page is None:
+            self._chloe_page = ChloePage(BASE_DIR / "chloe_detroit_become_human.glb", self)
+            if self._chloe_page.viewport is not None:
+                self._chloe_page.viewport.ready_changed.connect(self._on_chloe_ready)
+            self._hud_cam_stack.addWidget(self._chloe_page)
+        return self._chloe_page.viewport is not None
+
+    def _show_chloe_page(self) -> bool:
+        if not self._ensure_chloe_page():
+            from memory.config_manager import save_hud_style
+            save_hud_style("face")
+            self.hud.hud_style = "face"
+            if self._hud_cam_stack.currentWidget() not in (
+                    self._hud_cam_stack.widget(1), self._video_cont):
+                self._hud_cam_stack.setCurrentWidget(self.hud)
+            self._refresh_hud_btn()
+            self._log.append_log("SYS: Chloe 3D indisponível; holograma restaurado.")
+            return False
+        if self._hud_cam_stack.currentWidget() not in (
+                self._hud_cam_stack.widget(1), self._video_cont):
+            self._hud_cam_stack.setCurrentWidget(self._chloe_page)
+        return True
+
+    def _restore_hud_page(self) -> None:
+        """Restore the selected avatar after camera or video closes."""
+        if self._video_on:
+            return
+        if self.hud.hud_style == "chloe" and self._chloe_page is not None:
+            self._hud_cam_stack.setCurrentWidget(self._chloe_page)
+        else:
+            self._hud_cam_stack.setCurrentWidget(self.hud)
+
+    def _on_chloe_ready(self, ready: bool, error: str) -> None:
+        if ready:
+            self._log.append_log("SYS: Chloe 3D renderer ready.")
+            return
+        detail = error or "unknown OpenGL error"
+        print(f"[Chloe] Voltando ao holograma QPainter: {detail}", flush=True)
+        try:
+            from memory.config_manager import save_hud_style
+            save_hud_style("face")
+        except Exception:
+            pass
+        self.hud.hud_style = "face"
+        if self._hud_cam_stack.currentWidget() is self._chloe_page:
+            self._hud_cam_stack.setCurrentWidget(self.hud)
+        self._refresh_hud_btn()
+        self._log.append_log("SYS: Chloe 3D indisponível; holograma restaurado.")
+
     def _on_cam_stream(self, start: bool) -> None:
         if start:
             self._hud_cam_stack.setCurrentIndex(1)
         else:
-            self._hud_cam_stack.setCurrentIndex(0)
+            self._restore_hud_page()
             self._cam_live_lbl.clear()
 
     def _on_cam_frame(self, data: bytes) -> None:
@@ -5151,7 +5249,7 @@ class MainWindow(QMainWindow):
                 p.setSource(QUrl())
         self._video_split = False
         self._video_on = False
-        self._hud_cam_stack.setCurrentIndex(0)
+        self._restore_hud_page()
         self._sync_mic_for_video()      # gives the microphone back
 
     def _set_video_muted(self, muted: bool) -> None:
@@ -7013,8 +7111,7 @@ class MainWindow(QMainWindow):
 
 
     def _refresh_hud_btn(self):
-        from memory.config_manager import get_hud_style
-        face = get_hud_style() == "face"
+        mode = self.hud.hud_style
         # Neither state is "off", so both read as active — this is a choice
         # between two things, not a switch with a disabled side.
         style = f"""
@@ -7022,31 +7119,31 @@ class MainWindow(QMainWindow):
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  " + t("HUD: ANIMATED FACE") if face
-                              else "◉  " + t("HUD: REACTOR CORE"))
+        labels = {
+            "face": "🧑  " + t("HUD: ANIMATED FACE"),
+            "core": "◉  " + t("HUD: REACTOR CORE"),
+            "chloe": "◈  CHLOE 3D",
+        }
+        self._hud_btn.setText(labels.get(mode, labels["face"]))
         self._hud_btn.setStyleSheet(style)
-        self._hud_btn.setToolTip(
-            "Uma cabeça animada que fala suas palavras e mostra o que o JARVIS está "
-            "fazendo. Toque para alternar para o núcleo do reator."
-            if face else
-            "Um núcleo de reator que gira com o estado e se move com sua voz. "
-            "Toque para alternar para a cabeça animada.")
+        self._hud_btn.setToolTip("Alternar entre o holograma, o núcleo do reator e a Chloe 3D.")
 
     def _toggle_hud_style(self):
-        """Swap the centrepiece. Both objects stay in memory, so the change is
-        instant and switching back costs nothing."""
-        from memory.config_manager import get_hud_style, save_hud_style
-        want = "core" if get_hud_style() == "face" else "face"
+        """Cycle between the software HUD and the isolated Chloe GLB viewport."""
+        from memory.config_manager import save_hud_style
+        modes = ("face", "core", "chloe")
+        current = self.hud.hud_style
+        want = modes[(modes.index(current) + 1) % len(modes)] if current in modes else "face"
         save_hud_style(want)
-        try:
-            self.hud.hud_style = want
-            self.hud.update()
-        except Exception:
-            pass
+        self.hud.hud_style = want
+        self.hud.update()
+        if want == "chloe":
+            self._show_chloe_page()
+        elif self._hud_cam_stack.currentWidget() is self._chloe_page:
+            self._hud_cam_stack.setCurrentWidget(self.hud)
         self._refresh_hud_btn()
-        self._log.append_log(
-            "SYS: HUD switched to the animated face." if want == "face"
-            else "SYS: HUD switched to the reactor core.")
+        descriptions = {"face": "animated face", "core": "reactor core", "chloe": "Chloe 3D"}
+        self._log.append_log(f"SYS: HUD switched to the {descriptions[want]}.")
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,

@@ -130,16 +130,15 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
-HUD_STYLES = ("face", "core")
+HUD_STYLES = ("face", "core", "chloe")
 
 
 def get_hud_style() -> str:
-    """Which centrepiece the HUD draws: the animated head, or the reactor core.
+    """Which centrepiece the HUD displays: animated head, reactor, or Chloe 3D.
 
-    Taste, not capability — both render in the same software painter and cost
-    about the same. Defaults to the head because that is what MARK LIV shipped
-    with; anyone who preferred the older look can switch back in ⚙ and the
-    choice survives a restart.
+    Taste, not capability — Chloe 3D is isolated from the software HUD so a
+    graphics failure falls back to the animated head. Defaults to the head,
+    which is what MARK LIV shipped with; the choice survives a restart.
     """
     v = str(load_api_keys().get("hud_style", "face")).strip().lower()
     return v if v in HUD_STYLES else "face"

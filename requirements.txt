@@ -9,13 +9,13 @@
 # Atualizações menores e de correção continuam sendo instaladas normalmente.
 
 # ── Núcleo: interface, áudio e Gemini Live ────────────────────────────────────
-# PyQt6 e numpy também dão suporte ao avatar holográfico: a cabeça é renderizada
-# por software com QPainter e posicionada com numpy. Assim, o rosto não precisa
-# de pacote adicional, OpenGL ou GPU. Nenhuma dependência abaixo foi adicionada
-# especificamente para esse recurso.
+# O holograma QPainter continua sem dependência gráfica extra. Chloe 3D é um
+# viewport opcional e isolado, baseado no OpenGL já fornecido pelo Qt.
 PyQt6>=6.6,<7
 sounddevice>=0.4,<1
 numpy>=1.24,<3
+PyOpenGL>=3.1,<4
+pygltflib>=1.16,<2
 google-genai>=2.8.0,<3
 # Declarado mesmo que google-genai já o instale. O código em providers/ importa
 # esse pacote diretamente, e um pacote que você importa também é uma dependência
