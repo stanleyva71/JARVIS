@@ -499,6 +499,8 @@ python main.py
 
 O `setup.py` instala somente o que seu sistema operacional precisa — bibliotecas exclusivas do Windows são ignoradas automaticamente no macOS e Linux, e vice-versa. Ele também verifica sua versão do Python logo no início, para que um interpretador incorreto gere uma mensagem clara em vez de uma parede de texto do pip. Prefere fazer a instalação manualmente? `pip install -r requirements.txt` também funciona.
 
+A Chloe 3D é opcional e usa Qt WebEngine; consulte [as instruções de instalação e empacotamento](tools/chloe_qwebengine_poc/JARVIS_INTEGRATION.md).
+
 > ⚠️ **Nota de instalação:** Se aparecer um `ModuleNotFoundError` para um pacote específico do sistema operacional, instale-o com `pip install <module_name>`. O mecanismo opcional de **palavra de ativação** não é instalado aqui — você pode baixá-lo com um clique em **⚙ → WAKE WORD**, dentro do aplicativo.
 
 ---

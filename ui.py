@@ -57,18 +57,13 @@ from PyQt6.QtWidgets import (
 )
 
 from core.i18n import t
+from core import chloe_webengine
+from core.chloe_webengine import ChloePage, HAVE_WEBENGINE
 
 try:
     from core.avatar import HoloAvatar
 except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
-
-try:
-    from core.chloe_gl import ChloeGLWidget
-except Exception as _chloe_import_error:  # pragma: no cover - optional renderer
-    ChloeGLWidget = None
-    print(f"[Chloe] 3D renderer unavailable ({_chloe_import_error})", flush=True)
-
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -971,38 +966,6 @@ class HudCanvas(QWidget):
             p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
 
         p.end()   # end deterministically so the backing store never flushes an active painter
-
-class ChloePage(QWidget):
-    """Isolated 3D page; its OpenGL surface never overlaps the QPainter HUD."""
-
-    def __init__(self, model_path: Path, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet(f"background: {C.BG};")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.status = QLabel("◈  CHLOE 3D · INITIALIZING")
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setStyleSheet(
-            f"color: {C.PRI}; background: {C.PANEL}; border-bottom: 1px solid {C.BORDER};"
-            "padding: 6px; font: bold 9pt 'Courier New';"
-        )
-        layout.addWidget(self.status)
-        if ChloeGLWidget is None:
-            self.viewport = None
-            self.status.setText("CHLOE 3D · RENDERER UNAVAILABLE — QPAINTER HUD IS AVAILABLE")
-            self.status.setStyleSheet(
-                f"color: {C.ACC}; background: {C.PANEL}; padding: 6px; font: bold 9pt 'Courier New';"
-            )
-        else:
-            self.viewport = ChloeGLWidget(model_path, self)
-            layout.addWidget(self.viewport, stretch=1)
-            self.viewport.ready_changed.connect(self._render_state)
-
-    def _render_state(self, ready: bool, error: str) -> None:
-        self.status.setText("◈  CHLOE 3D · IDLE" if ready
-                            else "CHLOE 3D · FAILED — RETURNING TO HOLOGRAM")
-
 
 class MetricBar(QWidget):
 
@@ -5045,28 +5008,58 @@ class MainWindow(QMainWindow):
 
     # --- Live camera stream in HUD area ------------------------------------
     def _ensure_chloe_page(self) -> bool:
-        if (self._chloe_page is not None and self._chloe_page.viewport is not None
-                and self._chloe_page.viewport.failure):
+        if self._chloe_page is not None and self._chloe_page.failure:
             self._hud_cam_stack.removeWidget(self._chloe_page)
+            self._chloe_page.shutdown()
             self._chloe_page.deleteLater()
             self._chloe_page = None
-        if self._chloe_page is None:
-            self._chloe_page = ChloePage(BASE_DIR / "chloe_detroit_become_human.glb", self)
-            if self._chloe_page.viewport is not None:
-                self._chloe_page.viewport.ready_changed.connect(self._on_chloe_ready)
-            self._hud_cam_stack.addWidget(self._chloe_page)
-        return self._chloe_page.viewport is not None
+        if self._chloe_page is not None:
+            return self._chloe_page.available
+        if not HAVE_WEBENGINE:
+            self._chloe_failure_reason = (
+                "PyQt6-WebEngine nao esta instalado. "
+                + chloe_webengine.WEBENGINE_IMPORT_ERROR
+            )
+            return False
+
+        page = None
+        try:
+            page = ChloePage(BASE_DIR / "chloe_detroit_become_human.glb", BASE_DIR, self)
+            if not page.available:
+                self._chloe_failure_reason = page.failure or "QWebEngineView indisponivel."
+                page.shutdown()
+                page.deleteLater()
+                return False
+            page.status_changed.connect(self._on_chloe_ready)
+            self._hud_cam_stack.addWidget(page)
+            self._chloe_page = page
+            page.start()
+            return True
+        except Exception as exc:  # Renderer startup must never stop the main UI.
+            self._chloe_failure_reason = f"Falha ao iniciar o WebEngine da Chloe: {exc}"
+            if page is not None:
+                if self._hud_cam_stack.indexOf(page) >= 0:
+                    self._hud_cam_stack.removeWidget(page)
+                page.shutdown()
+                page.deleteLater()
+            self._chloe_page = None
+            print(f"[Chloe] {self._chloe_failure_reason}", flush=True)
+            return False
 
     def _show_chloe_page(self) -> bool:
         if not self._ensure_chloe_page():
-            from memory.config_manager import save_hud_style
-            save_hud_style("face")
+            try:
+                from memory.config_manager import save_hud_style
+                save_hud_style("face")
+            except Exception:
+                pass
             self.hud.hud_style = "face"
             if self._hud_cam_stack.currentWidget() not in (
                     self._hud_cam_stack.widget(1), self._video_cont):
                 self._hud_cam_stack.setCurrentWidget(self.hud)
             self._refresh_hud_btn()
-            self._log.append_log("SYS: Chloe 3D indisponível; holograma restaurado.")
+            reason = getattr(self, "_chloe_failure_reason", "WebEngine unavailable")
+            self._log.append_log(f"SYS: Chloe 3D indisponivel ({reason}); holograma QPainter restaurado.")
             return False
         if self._hud_cam_stack.currentWidget() not in (
                 self._hud_cam_stack.widget(1), self._video_cont):
@@ -5077,17 +5070,19 @@ class MainWindow(QMainWindow):
         """Restore the selected avatar after camera or video closes."""
         if self._video_on:
             return
-        if self.hud.hud_style == "chloe" and self._chloe_page is not None:
+        if (self.hud.hud_style == "chloe" and self._chloe_page is not None
+                and self._chloe_page.available and not self._chloe_page.failure):
             self._hud_cam_stack.setCurrentWidget(self._chloe_page)
         else:
             self._hud_cam_stack.setCurrentWidget(self.hud)
 
     def _on_chloe_ready(self, ready: bool, error: str) -> None:
         if ready:
-            self._log.append_log("SYS: Chloe 3D renderer ready.")
+            self._log.append_log("SYS: Chloe 3D pronta no WebEngine; animacao idle ativa.")
             return
-        detail = error or "unknown OpenGL error"
-        print(f"[Chloe] Voltando ao holograma QPainter: {detail}", flush=True)
+        detail = error or "erro desconhecido do WebEngine"
+        self._chloe_failure_reason = detail
+        print(f"[Chloe] Restaurando holograma QPainter: {detail}", flush=True)
         try:
             from memory.config_manager import save_hud_style
             save_hud_style("face")
@@ -5097,7 +5092,7 @@ class MainWindow(QMainWindow):
         if self._hud_cam_stack.currentWidget() is self._chloe_page:
             self._hud_cam_stack.setCurrentWidget(self.hud)
         self._refresh_hud_btn()
-        self._log.append_log("SYS: Chloe 3D indisponível; holograma restaurado.")
+        self._log.append_log(f"SYS: Chloe 3D indisponivel ({detail}); holograma QPainter restaurado.")
 
     def _on_cam_stream(self, start: bool) -> None:
         if start:
@@ -7129,7 +7124,7 @@ class MainWindow(QMainWindow):
         self._hud_btn.setToolTip("Alternar entre o holograma, o núcleo do reator e a Chloe 3D.")
 
     def _toggle_hud_style(self):
-        """Cycle between the software HUD and the isolated Chloe GLB viewport."""
+        """Cycle between the software HUD and the local Three.js Chloe viewer."""
         from memory.config_manager import save_hud_style
         modes = ("face", "core", "chloe")
         current = self.hud.hud_style
@@ -7138,7 +7133,8 @@ class MainWindow(QMainWindow):
         self.hud.hud_style = want
         self.hud.update()
         if want == "chloe":
-            self._show_chloe_page()
+            if not self._show_chloe_page():
+                return
         elif self._hud_cam_stack.currentWidget() is self._chloe_page:
             self._hud_cam_stack.setCurrentWidget(self.hud)
         self._refresh_hud_btn()
@@ -7592,6 +7588,11 @@ class MainWindow(QMainWindow):
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "JARVIS") or "JARVIS"
         self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
+
+    def closeEvent(self, event):
+        if self._chloe_page is not None:
+            self._chloe_page.shutdown()
+        super().closeEvent(event)
 
 
 class _RootShim:

@@ -1,0 +1,167 @@
+{
+  "window": "ui.MainWindow",
+  "tests": {
+    "starts_on_qpainter_without_webengine_page": {
+      "passed": true,
+      "detail": null
+    },
+    "missing_webengine_falls_back_to_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "manual_hud_button_selects_chloe": {
+      "passed": true,
+      "detail": null
+    },
+    "webengine_view_added_to_existing_hud_stack": {
+      "passed": true,
+      "detail": null
+    },
+    "chloe_viewport_is_qwebengineview": {
+      "passed": true,
+      "detail": null
+    },
+    "webengine_page_is_reused": {
+      "passed": true,
+      "detail": null
+    },
+    "local_html_load_finished": {
+      "passed": true,
+      "detail": null
+    },
+    "viewer_assets_stayed_local": {
+      "passed": true,
+      "detail": [
+        "http://127.0.0.1:63293/?hud=1",
+        "http://127.0.0.1:63293/viewer.bundle.js",
+        "http://127.0.0.1:63293/chloe.glb",
+        "http://127.0.0.1:63293/favicon.ico"
+      ]
+    },
+    "webgl2_active": {
+      "passed": true,
+      "detail": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "WebKit",
+        "renderer": "WebKit WebGL"
+      }
+    },
+    "model_meshes_and_skinning": {
+      "passed": true,
+      "detail": null
+    },
+    "skeleton_and_idle_clip": {
+      "passed": true,
+      "detail": null
+    },
+    "materials_and_textures": {
+      "passed": true,
+      "detail": null
+    },
+    "idle_animation_advances": {
+      "passed": true,
+      "detail": {
+        "framesBefore": 6,
+        "framesAfter": 66,
+        "animationTimeBefore": 0.1613999999985099,
+        "animationTimeAfter": 1.1608999999985103
+      }
+    },
+    "can_switch_to_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "can_switch_back_to_chloe": {
+      "passed": true,
+      "detail": null
+    },
+    "camera_page_routing_and_avatar_restore": {
+      "passed": true,
+      "detail": null
+    },
+    "video_page_routing_and_avatar_restore": {
+      "passed": true,
+      "detail": null
+    },
+    "resizable_hud_viewport": {
+      "passed": true,
+      "detail": [
+        824,
+        728
+      ]
+    },
+    "chat_and_voice_controls_present": {
+      "passed": true,
+      "detail": null
+    },
+    "chat_input_dispatches": {
+      "passed": true,
+      "detail": null
+    },
+    "video_widget_selected_by_open_path": {
+      "passed": true,
+      "detail": null
+    },
+    "local_video_playback": {
+      "passed": true,
+      "detail": {
+        "positionMs": 1000,
+        "error": ""
+      }
+    },
+    "video_close_restores_selected_chloe": {
+      "passed": true,
+      "detail": null
+    },
+    "camera_live_frame_displayed": {
+      "passed": null,
+      "detail": "No camera frame arrived; stack routing was tested, hardware capture unavailable."
+    },
+    "camera_stop_restores_selected_chloe": {
+      "passed": true,
+      "detail": null
+    },
+    "frames_before_minimize": 219,
+    "minimize_restore_keeps_webgl_and_animation": {
+      "passed": true,
+      "detail": {
+        "before": 219,
+        "after": 329,
+        "context": "active"
+      }
+    },
+    "real_main_window_screenshot_saved": {
+      "passed": true,
+      "detail": "C:\\Users\\Usuario\\Documents\\Projetos\\Mark-LVI-main\\tools\\chloe_qwebengine_poc\\jarvis-main-chloe.png"
+    },
+    "html_failure_restores_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "glb_failure_restores_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "javascript_failure_restores_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "webgl_failure_restores_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "chromium_termination_restores_qpainter": {
+      "passed": true,
+      "detail": null
+    },
+    "normal_window_close_stops_viewer": {
+      "passed": true,
+      "detail": {
+        "closed": true,
+        "server": null
+      }
+    }
+  },
+  "failures": [],
+  "screenshot": "C:\\Users\\Usuario\\Documents\\Projetos\\Mark-LVI-main\\tools\\chloe_qwebengine_poc\\jarvis-main-chloe.png"
+}

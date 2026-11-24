@@ -1,0 +1,5 @@
+# Optional desktop renderer. The WebEngine wheels include their matching Qt
+# WebEngine runtime; keep this compatible with the validated PyQt6 6.12 series.
+PyQt6>=6.12,<7
+PyQt6-WebEngine==6.140.1
+PyQt6-WebEngine-Qt6==6.140.0
