@@ -1,0 +1,14 @@
+{
+  "name": "jarvis-chloe-qwebengine-poc",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "esbuild ./viewer.js --bundle --format=iife --platform=browser --target=chrome112 --minify --outfile=./vendor/chloe-viewer.bundle.js"
+  },
+  "dependencies": {
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

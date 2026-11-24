@@ -1,0 +1,110 @@
+{
+  "mode": "window",
+  "python": "3.13.17 (tags/v3.13.17:64e080d, Oct 21 2026, 14:08:53) [MSC v.1944 64 bit (AMD64)]",
+  "poc": "C:\\Users\\Usuario\\Documents\\Projetos\\Mark-LVI-main\\tools\\chloe_qwebengine_poc",
+  "localAssetsOnly": true,
+  "tests": {
+    "standaloneResized": true,
+    "framesBeforeMinimize": 135,
+    "windowMinimized": true,
+    "framesAfterRestore": 268,
+    "restoredWindowVisible": true,
+    "webglRecoveredAfterRestore": true,
+    "animationFramesResumeAfterRestore": true,
+    "renderFps": 60,
+    "smoothRenderFps": true,
+    "noWebglErrors": true,
+    "noRemoteRequests": true,
+    "noJsConsoleErrors": true,
+    "closeEventReceived": true
+  },
+  "failures": [],
+  "webengineSettings": {
+    "WebGLEnabled": true,
+    "LocalContentCanAccessRemoteUrls": false
+  },
+  "loadFinished": true,
+  "initialModelStatus": {
+    "loaded": true,
+    "webgl": {
+      "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+      "vendor": "WebKit",
+      "renderer": "WebKit WebGL"
+    },
+    "webglContext": "active",
+    "webglErrors": [],
+    "jsErrors": [],
+    "frames": 1,
+    "fps": 0,
+    "meshes": 11,
+    "skinnedMeshes": 11,
+    "bones": 66,
+    "materials": 11,
+    "textures": 13,
+    "clips": [
+      {
+        "name": "idle",
+        "duration": 16.633333206176758
+      }
+    ],
+    "animationTracks": 90,
+    "bounds": [
+      0.8105798972587009,
+      2.499999992425667,
+      0.41085598297827564
+    ],
+    "animationTime": 0.05
+  },
+  "finalModelStatus": {
+    "loaded": true,
+    "webgl": {
+      "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+      "vendor": "WebKit",
+      "renderer": "WebKit WebGL"
+    },
+    "webglContext": "active",
+    "webglErrors": [],
+    "jsErrors": [],
+    "frames": 268,
+    "fps": 60,
+    "meshes": 11,
+    "skinnedMeshes": 11,
+    "bones": 66,
+    "materials": 11,
+    "textures": 13,
+    "clips": [
+      {
+        "name": "idle",
+        "duration": 16.633333206176758
+      }
+    ],
+    "animationTracks": 90,
+    "bounds": [
+      0.8105798972587009,
+      2.499999992425667,
+      0.41085598297827564
+    ],
+    "animationTime": 4.553799999998884,
+    "drawCalls": 11
+  },
+  "network": {
+    "localRequests": [
+      "http://127.0.0.1:55702/",
+      "http://127.0.0.1:55702/viewer.bundle.js",
+      "http://127.0.0.1:55702/chloe.glb",
+      "http://127.0.0.1:55702/favicon.ico"
+    ],
+    "blockedRemoteRequests": []
+  },
+  "uiHeartbeatMs": {
+    "mean": 20.61,
+    "p95": 20.86,
+    "max": 186.86,
+    "samples": 324
+  },
+  "consoleMessages": [],
+  "qtMessages": [],
+  "javascriptErrors": [],
+  "webEngineRendererTermination": null,
+  "screenshot": "qwebengine-window.png"
+}

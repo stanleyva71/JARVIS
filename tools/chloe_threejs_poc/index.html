@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chloe GLB · Three.js PoC</title>
+  <style>
+    :root { color-scheme: dark; font: 14px/1.45 "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080d13; color: #e8f3fb; }
+    #scene { position: fixed; inset: 0; }
+    #scene canvas { display: block; width: 100%; height: 100%; }
+    .panel { position: fixed; z-index: 2; top: 18px; right: 18px; width: min(300px, calc(100vw - 36px)); padding: 14px 17px; border: 1px solid #274351; border-radius: 10px; background: #07141de8; box-shadow: 0 12px 32px #0008; backdrop-filter: blur(10px); }
+    h1 { margin: 0 0 7px; color: #79e8f0; font-size: 16px; letter-spacing: .12em; }
+    #status { color: #c9d8e3; }
+    #details { margin-top: 7px; color: #93aaba; font: 12px/1.55 Consolas, monospace; white-space: pre-line; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 10px; }
+    label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+    button { padding: 5px 10px; border: 1px solid #37616c; border-radius: 6px; background: #10232c; color: #d9f8fa; cursor: pointer; }
+    button:hover { border-color: #79e8f0; }
+    #hint { position: fixed; z-index: 2; right: 18px; bottom: 16px; padding: 7px 11px; border-radius: 6px; color: #a9bdc8; background: #07141de0; font-size: 12px; }
+    .error { color: #ff9b9b !important; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <div id="scene"></div>
+  <section class="panel" aria-live="polite">
+    <h1>CHLOE · THREE.JS / GLTFLOADER</h1>
+    <div id="status">Iniciando WebGL…</div>
+    <div id="details"></div>
+    <div class="controls">
+      <label><input id="animate" type="checkbox" checked disabled> Reproduzir animação</label>
+      <button id="frame" type="button" disabled>Enquadrar personagem</button>
+    </div>
+  </section>
+  <div id="hint">Arraste para orbitar · roda para aproximar</div>
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>
