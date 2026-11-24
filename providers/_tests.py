@@ -446,6 +446,180 @@ def test_audio():
           audio.to_float32(b"\x00\x01\x02").size == 1)
 
 
+async def test_fish_audio_tts():
+    import io
+    import struct
+    import wave
+    from unittest.mock import patch
+
+    import httpx
+
+    from providers import audio
+    from providers.engine_pipeline import PipelineEngine
+    from providers.tts_fish_audio import API, FishAudioTTS
+
+    section("[6b] Fish Audio TTS")
+    api_key = "fish-test-key-never-log"
+
+    def wav_data(rate=12000, frames=1200):
+        output = io.BytesIO()
+        with wave.open(output, "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(rate)
+            stream.writeframes(struct.pack("<h", 1000) * frames)
+        return output.getvalue()
+
+    def mocked_client(handler):
+        real_client = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+        return patch(
+            "httpx.AsyncClient",
+            side_effect=lambda **kwargs: real_client(
+                transport=transport, **kwargs
+            ),
+        )
+
+    def provider(**overrides):
+        cfg = {
+            "api_key": api_key,
+            "reference_id": "test-voice-reference",
+        }
+        cfg.update(overrides)
+        return FishAudioTTS(cfg)
+
+    captured = {}
+
+    def success(request):
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers["Authorization"]
+        captured["content_type"] = request.headers["Content-Type"]
+        captured["model"] = request.headers["model"]
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, content=wav_data(), request=request)
+
+    with mocked_client(success):
+        chunks = [piece async for piece in provider(
+            model="s2-pro", latency="low"
+        ).speak("  Hello Fish.  ")]
+    expected_pcm = audio.resample(
+        struct.pack("<h", 1000) * 1200, 12000, audio.SPEAKER_RATE
+    )
+    check("Fish Audio endpoint and Bearer authentication",
+          captured.get("url") == API
+          and captured.get("authorization") == f"Bearer {api_key}"
+          and captured.get("content_type") == "application/json")
+    check("Fish Audio model, reference ID and settings",
+          captured.get("model") == "s2-pro"
+          and captured.get("payload") == {
+              "text": "Hello Fish.",
+              "reference_id": "test-voice-reference",
+              "format": "wav",
+              "sample_rate": 24000,
+              "latency": "low",
+          })
+    check("WAV converted to 24 kHz mono PCM chunks",
+          b"".join(chunks) == expected_pcm
+          and [len(piece) for piece in chunks] == [2400, 2400])
+
+    def timeout(request):
+        raise httpx.ReadTimeout("simulated timeout", request=request)
+
+    with mocked_client(timeout):
+        try:
+            [piece async for piece in provider().speak("Hello.")]
+            timeout_error = ""
+        except RuntimeError as exc:
+            timeout_error = str(exc)
+    check("Fish Audio timeout is reported",
+          "timed out" in timeout_error.lower())
+
+    def unauthorized(request):
+        body = json.dumps({"message": f"Rejected token {api_key}"})
+        return httpx.Response(401, text=body, request=request)
+
+    with mocked_client(unauthorized):
+        try:
+            [piece async for piece in provider().speak("Hello.")]
+            auth_error = ""
+        except RuntimeError as exc:
+            auth_error = str(exc)
+    check("Fish Audio authentication errors redact the API key",
+          "401" in auth_error and api_key not in auth_error)
+
+    def unavailable(request):
+        return httpx.Response(503, text="service unavailable", request=request)
+
+    with mocked_client(unavailable):
+        try:
+            [piece async for piece in provider().speak("Hello.")]
+            http_error = ""
+        except RuntimeError as exc:
+            http_error = str(exc)
+    check("Fish Audio HTTP errors are reported", "503" in http_error)
+
+    def invalid_audio(request):
+        return httpx.Response(200, content=b"not a wav file", request=request)
+
+    with mocked_client(invalid_audio):
+        try:
+            [piece async for piece in provider().speak("Hello.")]
+            wav_error = ""
+        except RuntimeError as exc:
+            wav_error = str(exc)
+    check("an invalid WAV response is rejected", "invalid WAV" in wav_error)
+
+    async def speak_error(tts):
+        try:
+            [piece async for piece in tts.speak("Hello.")]
+            return ""
+        except RuntimeError as exc:
+            return str(exc)
+
+    no_key = await speak_error(
+        FishAudioTTS({"reference_id": "test-voice-reference"})
+    )
+    no_reference = await speak_error(FishAudioTTS({"api_key": api_key}))
+    check("missing API key and reference ID are rejected",
+          "API key" in no_key and "reference ID" in no_reference)
+
+    from providers import registry
+
+    declaration = registry.get_declaration("fish_audio") or {}
+    fields = {field.key: field for field in declaration.get("needs", ())}
+    check("Fish Audio is registered with generated UI fields",
+          declaration.get("kind") == "tts"
+          and fields.get("api_key") is not None
+          and fields["api_key"].kind == "secret"
+          and fields["api_key"].required
+          and fields.get("reference_id") is not None
+          and fields["reference_id"].required
+          and fields.get("model") is not None
+          and bool(fields["model"].choices)
+          and fields.get("latency") is not None)
+
+    class FakeLLM:
+        caps = {}
+
+    engine = PipelineEngine(FakeLLM(), tts=provider())
+
+    def pipeline_audio(request):
+        return httpx.Response(
+            200, content=wav_data(rate=24000, frames=2400), request=request
+        )
+
+    with mocked_client(pipeline_audio):
+        await engine._speak("Hello from the pipeline.")
+    messages = []
+    while not engine._queue.empty():
+        messages.append(engine._queue.get_nowait())
+    await engine.close()
+    check("Fish Audio PCM blocks reach the pipeline playback queue",
+          len(messages) == 2
+          and all(message.data for message in messages)
+          and [len(message.data) for message in messages] == [2400, 2400])
+
+
 async def test_failures_name_the_part():
     """Three services can fail; the log has to say which, and where."""
     from providers.engine_pipeline import PipelineEngine
@@ -2134,6 +2308,7 @@ async def main() -> int:
     test_vision_is_asked_not_guessed()
     test_schema()
     test_audio()
+    await test_fish_audio_tts()
     await test_failures_name_the_part()
     test_addresses()
     test_costs_nothing_when_unused()

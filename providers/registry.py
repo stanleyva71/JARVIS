@@ -36,7 +36,7 @@ from core.ai_policy import validate_provider
 _MODULES: dict[str, tuple[str, ...]] = {
     "llm": ("llm_openai",),
     "stt": ("stt_whisper",),
-    "tts": ("tts_piper", "tts_system", "tts_elevenlabs"),
+    "tts": ("tts_piper", "tts_system", "tts_elevenlabs", "tts_fish_audio"),
     "engine": ("engine_pipeline",),
 }
 

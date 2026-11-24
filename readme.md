@@ -54,6 +54,7 @@ Não é apenas um assistente — é uma extensão da sua vida digital.
 | 🔌 Escolha do mecanismo | Gemini Live ou sua própria combinação de STT + LLM + TTS — selecionada pela interface, sem editar arquivos |
 | 🏠 Modelos locais e de terceiros | Ollama · LM Studio · llama.cpp · vLLM · OpenAI · Groq · DeepSeek · Mistral · xAI · OpenRouter — uma configuração, pois todos compartilham o mesmo protocolo |
 | 🗣️ Voz local | Whisper na CPU para ouvir e Piper para falar — **cerca de 50 idiomas**, com voz neural e funcionamento totalmente offline |
+| 🌊 Voz Fish Audio | Síntese em nuvem configurável no painel ENGINE & PROVIDERS com API Key, Reference ID, modelo e latência |
 | 🌍 A voz acompanha seu idioma | O Whisper identifica o idioma que você falou; a resposta é reproduzida com a voz correspondente, com possibilidade de mudança durante a conversa |
 | 🤫 Raciocínio permanece privado | O bloco `<think>` é filtrado antes da resposta, pois vários servidores o transmitem como conteúdo comum. Sem esse filtro, o assistente lê o próprio raciocínio em voz alta: meio minuto de *"o usuário está cumprimentando você; responda de maneira acolhedora..."* falado por inteiro antes do cumprimento. Esse conteúdo também vai para o log, o resumo da sessão e o histórico da conversa, consumindo contexto em todas as interações seguintes. |
 
@@ -136,6 +137,10 @@ Ele **não é mais rápido.** O Gemini Live responde em aproximadamente 0,3 a 0,
 Ele também abre mão de interrupção durante a fala (*barge-in*), detecção de turno no servidor, áudio proativo e retomada de sessão.
 
 Em compensação, mantém ferramentas, memória, avatar, sincronização labial, desfazer e a etapa de confirmação. E continua funcionando quando a cota acaba, a conexão cai ou o microfone não pode sair do prédio. Essa é a troca, apresentada claramente para que ninguém escolha o modo local esperando obter as mesmas características do Live.
+
+#### Configurar Fish Audio
+
+No painel **ENGINE & PROVIDERS**, selecione explicitamente o pipeline e escolha **Fish Audio** no campo TTS. Informe a API Key e o Reference ID da voz; modelo e latência são opcionais. Depois de **SAVE & APPLY**, o WAV recebido é convertido para PCM pelo fluxo de áudio existente. Isso não altera o modo Gemini Live por conta própria.
 
 ### 🤝 Parou de afirmar que fez coisas que não fez
 
@@ -482,7 +487,7 @@ Ele é mantido apenas na memória, de propósito: gravá-lo no disco faria uma n
 | **LIII** | Palavra de ativação · Gemini 3.1 Flash Live · resposta imediata de confirmação · arquitetura de ações/plugins autodescritiva |
 | **LIV** | Avatar holográfico · sincronização labial por visemas · expressões faciais · rosto como indicador de status · push-to-talk · proteção contra o próprio eco · autoconhecimento e limites em tempo de execução |
 | **LV** | Vídeo no HUD · sequência de modelos com fallback medido · painéis de configurações separados · lista reduzida de recursos integrados |
-| **LVI** | Escolha do mecanismo · modelos locais e de terceiros · Whisper + Piper em cerca de 50 idiomas · voz que acompanha o idioma · ElevenLabs · limite de ferramentas para modelos pequenos · resultados verificados em vez de sucessos presumidos · fechar aplicativos pelo nome · proteção para conteúdo não confiável · transparência de compatibilidade com Wayland e macOS · painel de controle para celular reforçado |
+| **LVI** | Escolha do mecanismo · modelos locais e de terceiros · Whisper + Piper em cerca de 50 idiomas · voz que acompanha o idioma · ElevenLabs · Fish Audio · limite de ferramentas para modelos pequenos · resultados verificados em vez de sucessos presumidos · fechar aplicativos pelo nome · proteção para conteúdo não confiável · transparência de compatibilidade com Wayland e macOS · painel de controle para celular reforçado |
 | *compartilhado* | Os cinco últimos recursos acima também foram lançados para LIII, LIV e LV ao mesmo tempo — avançar para uma versão superior nunca faz você perder esses recursos |
 | **LVII+** | Interrupção por voz · histórico de conversas · acesso completo a arquivos · câmera de segurança · Obsidian |
 
@@ -544,6 +549,7 @@ Mark LVI/
 │   ├── tts_piper.py          # Voz neural local, cerca de 50 idiomas, acompanha o idioma falado
 │   ├── tts_system.py         # Windows SAPI / macOS say / Linux espeak-ng — nada para baixar
 │   ├── tts_elevenlabs.py     # Uma voz, todos os idiomas, com transmissão em fluxo
+│   ├── tts_fish_audio.py     # Síntese Fish Audio — Reference ID para WAV e PCM do pipeline
 │   ├── engine_pipeline.py    # STT -> LLM -> TTS, utilizando a interface da sessão Live
 │   ├── _tests.py             # `python -m providers._tests` — sem rede e sem chave
 │   └── voices/               # Vozes Piper, baixadas sob demanda (ignoradas pelo git)
