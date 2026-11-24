@@ -456,7 +456,7 @@ async def test_fish_audio_tts():
 
     from providers import audio
     from providers.engine_pipeline import PipelineEngine
-    from providers.tts_fish_audio import API, FishAudioTTS
+    from providers.tts_fish_audio import API, FishAudioTTS, _wav_to_pcm
 
     section("[6b] Fish Audio TTS")
     api_key = "fish-test-key-never-log"
@@ -487,6 +487,11 @@ async def test_fish_audio_tts():
         }
         cfg.update(overrides)
         return FishAudioTTS(cfg)
+
+    defaults = provider()
+    check("Fish Audio defaults to the supported model and latency",
+          defaults.model == "s2.1-pro-free"
+          and defaults.latency == "balanced")
 
     captured = {}
 
@@ -521,6 +526,12 @@ async def test_fish_audio_tts():
     check("WAV converted to 24 kHz mono PCM chunks",
           b"".join(chunks) == expected_pcm
           and [len(piece) for piece in chunks] == [2400, 2400])
+
+    salvage_input = wav_data()
+    with patch("wave.open", side_effect=wave.Error("unsupported WAV subtype")):
+        recovered_pcm = _wav_to_pcm(salvage_input)
+    check("Fish WAV variants unsupported by wave use shared PCM salvage",
+          recovered_pcm == expected_pcm)
 
     def timeout(request):
         raise httpx.ReadTimeout("simulated timeout", request=request)
@@ -559,7 +570,11 @@ async def test_fish_audio_tts():
     check("Fish Audio HTTP errors are reported", "503" in http_error)
 
     def invalid_audio(request):
-        return httpx.Response(200, content=b"not a wav file", request=request)
+        return httpx.Response(
+            200, content=b"not a wav file",
+            headers={"Content-Type": "application/octet-stream"},
+            request=request,
+        )
 
     with mocked_client(invalid_audio):
         try:
@@ -568,6 +583,32 @@ async def test_fish_audio_tts():
         except RuntimeError as exc:
             wav_error = str(exc)
     check("an invalid WAV response is rejected", "invalid WAV" in wav_error)
+    check("invalid audio reports its safe response type and size",
+          "application/octet-stream" in wav_error
+          and "bytes" in wav_error)
+
+    def json_error(request):
+        body = json.dumps({"message": f"Voice unavailable for {api_key}"})
+        return httpx.Response(
+            200, content=body,
+            headers={"Content-Type": "application/json"},
+            request=request,
+        )
+
+    with mocked_client(json_error):
+        try:
+            [piece async for piece in provider().speak("Hello.")]
+            json_error_message = ""
+        except RuntimeError as exc:
+            json_error_message = str(exc)
+    check("JSON errors returned with HTTP 200 are explained safely",
+          "Voice unavailable" in json_error_message
+          and api_key not in json_error_message)
+
+    invalid_model = provider(model="Leon")
+    check("a voice name in the model field falls back safely",
+          invalid_model.model == "s2.1-pro-free"
+          and "invalid" in invalid_model.config_warning.lower())
 
     async def speak_error(tts):
         try:
@@ -1944,7 +1985,7 @@ def test_voices_follow_the_language():
 
 
 def test_leda_voice_availability_and_persistence():
-    """Leda is offered in customization and is persisted only after selection."""
+    """Native voices and Leon persist as distinct voice-provider selections."""
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -1952,8 +1993,11 @@ def test_leda_voice_availability_and_persistence():
     from memory.config_manager import (
         AVAILABLE_VOICES,
         CONFIG_FILE,
+        FISH_AUDIO_VOICE,
         get_voice,
+        get_voice_selection,
         save_voice,
+        save_voice_selection,
     )
 
     original = CONFIG_FILE.read_text(encoding="utf-8") if CONFIG_FILE.exists() else None
@@ -1963,10 +2007,12 @@ def test_leda_voice_availability_and_persistence():
                   preserved in AVAILABLE_VOICES)
         check("Leda is available",
               "Leda" in AVAILABLE_VOICES)
+        check("Leon is kept outside Gemini's prebuilt voices",
+              FISH_AUDIO_VOICE not in AVAILABLE_VOICES)
 
-        save_voice("Puck")
+        save_voice_selection("Puck")
         check("an existing voice is kept until changed",
-              get_voice() == "Puck")
+              get_voice() == "Puck" and get_voice_selection() == "Puck")
 
         try:
             from PyQt6.QtWidgets import QApplication
@@ -1984,18 +2030,55 @@ def test_leda_voice_availability_and_persistence():
         )
         check("Leda appears in customization",
               "Leda" in overlay._voice_btns)
+        check("Leon appears as a distinct Fish Audio option",
+              FISH_AUDIO_VOICE in overlay._voice_btns
+              and overlay._voice_btns[FISH_AUDIO_VOICE].text()
+              == "Leon (Fish Audio)")
+        overlay._on_voice_pick("Puck")
+        native_style = overlay._voice_btns["Puck"].styleSheet()
+        overlay._on_voice_pick(FISH_AUDIO_VOICE)
+        check("Leon uses the same selected-button style as native voices",
+              overlay._voice_btns[FISH_AUDIO_VOICE].styleSheet()
+              == native_style)
+        overlay._on_voice_pick("Puck")
         check("Puck remains selected automatically",
               overlay._sel_voice == "Puck"
               and overlay._voice_btns["Puck"].isChecked())
+        overlay.show()
+        app.processEvents()
+        check("voice buttons fit inside the customization overlay",
+              all(
+                  button.geometry().left() >= 0
+                  and button.geometry().right() <= overlay.width()
+                  and button.geometry().bottom() <= overlay.height()
+                  for button in overlay._voice_btns.values()
+              ))
+        overlay.hide()
 
         overlay._on_voice_pick("Leda")
         check("choosing Leda does not persist before Apply",
               overlay._sel_voice == "Leda"
               and get_voice() == "Puck")
 
-        save_voice("Leda")
+        save_voice_selection("Leda")
         check("Leda persists after selection",
-              get_voice() == "Leda")
+              get_voice() == "Leda" and get_voice_selection() == "Leda")
+
+        save_voice_selection(FISH_AUDIO_VOICE)
+        fish_overlay = UI.CustomizeOverlay(
+            assistant_name="JARVIS",
+            user_name="",
+            ui_color=UI.DEFAULT_UI_COLOR,
+            voice=get_voice_selection(),
+        )
+        check("Leon selection persists without replacing Gemini voice",
+              get_voice_selection() == FISH_AUDIO_VOICE
+              and get_voice() == "Leda"
+              and fish_overlay._sel_voice == FISH_AUDIO_VOICE
+              and fish_overlay._voice_btns[FISH_AUDIO_VOICE].isChecked())
+        save_voice_selection("Charon")
+        check("a native selection restores Gemini voice mode",
+              get_voice_selection() == "Charon" and get_voice() == "Charon")
 
         main_source = (Path(__file__).resolve().parent.parent / "main.py").read_text(
             encoding="utf-8")
@@ -2007,6 +2090,238 @@ def test_leda_voice_availability_and_persistence():
                 CONFIG_FILE.unlink()
         else:
             CONFIG_FILE.write_text(original, encoding="utf-8")
+
+
+async def test_hybrid_fish_audio_live_voice():
+    """Fish replaces only Live output audio; playback still uses the shared queue."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from main import JarvisLive
+    from memory.config_manager import FISH_AUDIO_VOICE
+
+    section("[22] Gemini Live with hybrid Fish Audio voice")
+
+    class UI:
+        muted = False
+
+        def __init__(self):
+            self.logs = []
+            self.states = []
+
+        def write_log(self, text):
+            self.logs.append(text)
+
+        def set_state(self, state):
+            self.states.append(state)
+
+    class Visemes:
+        def __init__(self):
+            self.text = []
+
+        def feed_text(self, text):
+            self.text.append(text)
+
+        def reset(self):
+            pass
+
+    class Session:
+        def __init__(self):
+            self.responses = asyncio.Queue()
+
+        async def receive(self):
+            while True:
+                response = await self.responses.get()
+                if response is None:
+                    return
+                yield response
+
+    class FishProvider:
+        config_warning = ""
+        model = "s2.1-pro-free"
+
+        def __init__(self, pcm):
+            self.pcm = pcm
+            self.spoken = []
+
+        def probe(self):
+            return True, "ready"
+
+        async def speak(self, text):
+            self.spoken.append(text)
+            yield self.pcm
+
+    def response(data=None, text=None, complete=False):
+        return SimpleNamespace(
+            data=data,
+            session_resumption_update=None,
+            tool_call=None,
+            server_content=SimpleNamespace(
+                output_transcription=(
+                    SimpleNamespace(text=text) if text is not None else None
+                ),
+                input_transcription=None,
+                turn_complete=complete,
+            ),
+        )
+
+    def app_for(session, engine_caps=None):
+        app = JarvisLive.__new__(JarvisLive)
+        app.session = session
+        app.ui = UI()
+        app._visemes = Visemes()
+        app._engine_caps = engine_caps
+        app._engine = None
+        app._turn_done_event = asyncio.Event()
+        app._dashboard = None
+        app._session_log = []
+        app._last_out_logged = ""
+        app._asst_name = "JARVIS"
+        app._resume_handle = None
+        app._vision_close_pending = False
+        app._interrupted = False
+        app._loop = asyncio.get_running_loop()
+        app.audio_in_queue = asyncio.Queue()
+        app._fish_tts_queue = None
+        app._fish_tts_current_task = None
+        app._fish_tts_stopping = False
+        app._fish_reset_transcription = False
+        app._speaking_lock = threading.Lock()
+        app._is_speaking = False
+        app._out_latency = 0.0
+        app._tail_until = 0.0
+        app._out_level = 0.0
+        app._play_cursor = 0.0
+        app._clear_stall = lambda: None
+        return app
+
+    async def stop_receiver(task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Leon keeps the native Live session active, but never queues its audio.
+    fish_pcm = b"\x11\x00" * 1200
+    session = Session()
+    app = app_for(session)
+    fish = FishProvider(fish_pcm)
+    built = {}
+
+    def build_fish(provider_id, cfg):
+        built["provider_id"] = provider_id
+        built["config"] = cfg
+        return fish
+
+    session.responses.put_nowait(response(text="Hello"))
+    session.responses.put_nowait(
+        response(data=b"native-gemini-audio", text="Hello, sir.", complete=True)
+    )
+    from providers import registry
+    with (
+        patch("memory.config_manager.get_voice_selection",
+              return_value=FISH_AUDIO_VOICE),
+        patch("memory.config_manager.get_provider_config", return_value={
+            "api_key": "test-key", "reference_id": "test-reference",
+        }),
+        patch("memory.config_manager.save_provider_config"),
+        patch.object(registry, "build", side_effect=build_fish),
+    ):
+        task = asyncio.create_task(app._receive_audio())
+        await asyncio.wait_for(app._turn_done_event.wait(), timeout=2)
+        fish_chunk = await asyncio.wait_for(app.audio_in_queue.get(), timeout=2)
+        await stop_receiver(task)
+    check("Leon synthesizes cumulative transcript exactly once",
+          fish.spoken == ["Hello, sir."] and app._visemes.text == ["Hello, sir."],
+          repr(fish.spoken))
+    check("native Live audio is discarded; Fish PCM uses the playback queue",
+          fish_chunk == fish_pcm and app.audio_in_queue.empty())
+    check("Leon uses the configured Fish Audio Reference ID",
+          built.get("provider_id") == "fish_audio"
+          and built.get("config", {}).get("reference_id") == "test-reference")
+    check("Fish Audio credentials are not copied into logs",
+          all("test-key" not in line for line in app.ui.logs))
+    check("the default Live session configuration remains AUDIO",
+          'response_modalities=["AUDIO"]' in
+          (Path(__file__).resolve().parent.parent / "main.py").read_text(
+              encoding="utf-8"))
+
+    # Native Live mode continues to queue Gemini audio without constructing Fish.
+    native_session = Session()
+    native_app = app_for(native_session)
+    native_session.responses.put_nowait(
+        response(data=b"native-audio", text="Native answer.", complete=True)
+    )
+    with patch("memory.config_manager.get_voice_selection", return_value="Kore"):
+        task = asyncio.create_task(native_app._receive_audio())
+        await asyncio.wait_for(native_app._turn_done_event.wait(), timeout=2)
+        native_chunk = await asyncio.wait_for(
+            native_app.audio_in_queue.get(), timeout=2
+        )
+        await stop_receiver(task)
+    check("a native Gemini voice still queues Gemini audio",
+          native_chunk == b"native-audio"
+          and native_app._visemes.text == ["Native answer."])
+
+    # The configured Pipeline engine remains responsible for its own TTS.
+    pipeline_session = Session()
+    pipeline_app = app_for(pipeline_session, engine_caps={})
+    pipeline_session.responses.put_nowait(
+        response(data=b"pipeline-audio", text="Pipeline answer.", complete=True)
+    )
+    with patch.object(
+        registry, "build",
+        side_effect=AssertionError("Live Fish adapter used in pipeline mode"),
+    ):
+        task = asyncio.create_task(pipeline_app._receive_audio())
+        await asyncio.wait_for(pipeline_app._turn_done_event.wait(), timeout=2)
+        pipeline_chunk = await asyncio.wait_for(
+            pipeline_app.audio_in_queue.get(), timeout=2
+        )
+        await stop_receiver(task)
+    check("Pipeline mode preserves its existing audio path",
+          pipeline_chunk == b"pipeline-audio")
+
+    # Interrupt cancels an active Fish request and prevents late audio delivery.
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class SlowFish(FishProvider):
+        async def speak(self, text):
+            self.spoken.append(text)
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+            yield self.pcm
+
+    interrupt_session = Session()
+    interrupt_app = app_for(interrupt_session)
+    slow_fish = SlowFish(fish_pcm)
+    interrupt_session.responses.put_nowait(
+        response(text="Stop now.", complete=True)
+    )
+    with (
+        patch("memory.config_manager.get_voice_selection",
+              return_value=FISH_AUDIO_VOICE),
+        patch("memory.config_manager.get_provider_config", return_value={
+            "api_key": "test-key", "reference_id": "test-reference",
+        }),
+        patch("memory.config_manager.save_provider_config"),
+        patch.object(registry, "build", return_value=slow_fish),
+    ):
+        task = asyncio.create_task(interrupt_app._receive_audio())
+        await asyncio.wait_for(started.wait(), timeout=2)
+        interrupt_app.interrupt()
+        await asyncio.wait_for(cancelled.wait(), timeout=2)
+        interrupt_session.responses.put_nowait(response(complete=True))
+        await asyncio.wait_for(interrupt_app._turn_done_event.wait(), timeout=2)
+        await stop_receiver(task)
+    check("interrupt cancels synthesis before it can enqueue stale audio",
+          interrupt_app.audio_in_queue.empty()
+          and interrupt_app._interrupted is False)
 
 
 def test_panel_settings_survive():
@@ -2320,6 +2635,7 @@ async def main() -> int:
     test_local_models_get_a_smaller_prompt()
     test_voices_follow_the_language()
     test_leda_voice_availability_and_persistence()
+    await test_hybrid_fish_audio_live_voice()
     test_voice_folder_is_writable()
     test_a_chosen_voice_downloads_itself()
     test_panel_settings_survive()

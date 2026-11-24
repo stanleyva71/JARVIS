@@ -55,6 +55,7 @@ Não é apenas um assistente — é uma extensão da sua vida digital.
 | 🏠 Modelos locais e de terceiros | Ollama · LM Studio · llama.cpp · vLLM · OpenAI · Groq · DeepSeek · Mistral · xAI · OpenRouter — uma configuração, pois todos compartilham o mesmo protocolo |
 | 🗣️ Voz local | Whisper na CPU para ouvir e Piper para falar — **cerca de 50 idiomas**, com voz neural e funcionamento totalmente offline |
 | 🌊 Voz Fish Audio | Síntese em nuvem configurável no painel ENGINE & PROVIDERS com API Key, Reference ID, modelo e latência |
+| 🎙️ Leon (Fish Audio) | Voz externa disponível em **PERSONALIZAR ASSISTENTE**: Gemini Live continua ouvindo, raciocinando e usando ferramentas; Fish Audio sintetiza a transcrição sem trocar o mecanismo |
 | 🌍 A voz acompanha seu idioma | O Whisper identifica o idioma que você falou; a resposta é reproduzida com a voz correspondente, com possibilidade de mudança durante a conversa |
 | 🤫 Raciocínio permanece privado | O bloco `<think>` é filtrado antes da resposta, pois vários servidores o transmitem como conteúdo comum. Sem esse filtro, o assistente lê o próprio raciocínio em voz alta: meio minuto de *"o usuário está cumprimentando você; responda de maneira acolhedora..."* falado por inteiro antes do cumprimento. Esse conteúdo também vai para o log, o resumo da sessão e o histórico da conversa, consumindo contexto em todas as interações seguintes. |
 
@@ -140,7 +141,7 @@ Em compensação, mantém ferramentas, memória, avatar, sincronização labial,
 
 #### Configurar Fish Audio
 
-No painel **ENGINE & PROVIDERS**, selecione explicitamente o pipeline e escolha **Fish Audio** no campo TTS. Informe a API Key e o Reference ID da voz; modelo e latência são opcionais. Depois de **SAVE & APPLY**, o WAV recebido é convertido para PCM pelo fluxo de áudio existente. Isso não altera o modo Gemini Live por conta própria.
+Configure a API Key e o Reference ID do provedor **Fish Audio** em **ENGINE & PROVIDERS**. Para usá-lo no pipeline, selecione explicitamente esse modo e escolha Fish Audio no campo TTS; o WAV recebido é convertido para PCM pelo fluxo de áudio existente. Para manter **Gemini Live** como mecanismo principal, deixe o modo atual como está e escolha **Leon (Fish Audio)** em **PERSONALIZAR ASSISTENTE**. Nesse modo, o Gemini continua recebendo o microfone, respondendo e executando ferramentas; apenas sua saída de áudio é substituída pela síntese da transcrição do Fish Audio. As seis vozes nativas continuam disponíveis e restauram o áudio original do Gemini.
 
 ### 🤝 Parou de afirmar que fez coisas que não fez
 

@@ -390,6 +390,45 @@ def _is_repeat_chunk(txt: str, buf: list) -> bool:
             return True
     return False
 
+
+def _transcription_delta(txt: str, previous: str) -> tuple[str, str]:
+    """Return only new transcript text, including cumulative and overlapping chunks."""
+    txt = _clean_transcript(txt)
+    if not txt:
+        return "", previous
+    previous = " ".join((previous or "").split())
+    if not previous:
+        return txt, txt
+    if txt.startswith(previous):
+        return txt[len(previous):], txt
+    if previous.startswith(txt):
+        return "", previous
+    for size in range(min(len(previous), len(txt)), 3, -1):
+        if previous.endswith(txt[:size]):
+            delta = txt[size:]
+            return delta, previous + delta
+    return txt, f"{previous} {txt}"
+
+
+def _append_transcription(buffer: str, delta: str) -> str:
+    text = (delta or "").strip()
+    if not text:
+        return buffer
+    if (buffer and not buffer[-1].isspace()
+            and text[0] not in ".,;:!?…。！？؟۔।"):
+        buffer += " "
+    return buffer + text
+
+
+def _take_complete_sentences(buffer: str) -> tuple[list[str], str]:
+    """Keep the unfinished tail buffered until a sentence boundary arrives."""
+    parts = re.split(r"(?<=[.!?。！？؟۔])\s+", buffer)
+    if len(parts) < 2:
+        return [], buffer
+    ready = [part.strip() for part in parts[:-1] if part.strip()]
+    return ready, parts[-1]
+
+
 def _clean_transcript(text: str) -> str:    
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
@@ -628,6 +667,10 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        self._fish_tts_queue = None
+        self._fish_tts_current_task = None
+        self._fish_tts_stopping = False
+        self._fish_reset_transcription = False
         # Which engine is holding the conversation, and what it can do.
         # None means Gemini Live — the default and, unless somebody has gone to
         # the providers settings and chosen otherwise, always the case. Every
@@ -1002,6 +1045,7 @@ class JarvisLive:
                 getattr(self._dashboard, "_bind_error", "") or "")
 
     def _on_text_command(self, text: str):
+        self._fish_reset_transcription = True
         with self._pending_text_lock:
             if not self._loop or not self.session:
                 self._pending_text_commands.append(text)
@@ -1031,6 +1075,7 @@ class JarvisLive:
         with self._pending_text_lock:
             pending, self._pending_text_commands = self._pending_text_commands, []
         for text in pending:
+            self._fish_reset_transcription = True
             await self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
                 turn_complete=True,
@@ -1130,6 +1175,9 @@ class JarvisLive:
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
+        if (self._fish_tts_queue is not None and self._loop is not None
+                and not self._loop.is_closed()):
+            self._loop.call_soon_threadsafe(self._cancel_fish_audio)
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1157,9 +1205,62 @@ class JarvisLive:
                 pass
         self.ui.write_log("SYS: " + _t("Interrupted — listening..."))
 
+    def _cancel_fish_audio(self) -> None:
+        queue = self._fish_tts_queue
+        if queue is not None:
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        task = self._fish_tts_current_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _synthesize_fish_text(self, provider, text: str) -> None:
+        fed_visemes = False
+        try:
+            async for pcm in provider.speak(text):
+                if self._interrupted:
+                    return
+                if not pcm:
+                    continue
+                if not fed_visemes:
+                    self._visemes.feed_text(text)
+                    fed_visemes = True
+                if self.audio_in_queue is not None:
+                    self.audio_in_queue.put_nowait(pcm)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.ui.write_log(f"ERR: Fish Audio synthesis failed — {exc}")
+
+    async def _fish_audio_worker(self, queue, provider) -> None:
+        while True:
+            kind, text = await queue.get()
+            if kind == "stop":
+                return
+            if text and provider is not None and not self._interrupted:
+                task = asyncio.create_task(
+                    self._synthesize_fish_text(provider, text)
+                )
+                self._fish_tts_current_task = task
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if self._fish_tts_stopping:
+                        task.cancel()
+                        raise
+                finally:
+                    if self._fish_tts_current_task is task:
+                        self._fish_tts_current_task = None
+            if kind == "turn_end" and self._turn_done_event:
+                self._turn_done_event.set()
+
     def speak(self, text: str):
         if not self._loop or not self.session:
             return
+        self._fish_reset_transcription = True
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -1777,10 +1878,70 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
+        fish_live_voice = False
+        fish_text_buffer = ""
+        fish_seen_text = ""
+        fish_queue = None
+        fish_worker = None
+        fish_provider = None
+        self._fish_tts_stopping = False
 
         try:
+            if self._engine_caps is None:
+                from memory.config_manager import (
+                    FISH_AUDIO_VOICE,
+                    get_provider_config,
+                    get_voice_selection,
+                    save_provider_config,
+                )
+                fish_live_voice = get_voice_selection() == FISH_AUDIO_VOICE
+                if fish_live_voice:
+                    from providers.registry import build
+
+                    try:
+                        fish_provider = build(
+                            "fish_audio", get_provider_config("fish_audio")
+                        )
+                        warning = getattr(fish_provider, "config_warning", "")
+                        if warning:
+                            self.ui.write_log(f"SYS: {warning}")
+                            try:
+                                save_provider_config(
+                                    "fish_audio",
+                                    {
+                                        "model": fish_provider.model,
+                                        "latency": fish_provider.latency,
+                                    },
+                                )
+                            except Exception as exc:
+                                self.ui.write_log(
+                                    "ERR: Could not save the Fish Audio "
+                                    f"model correction: {exc}"
+                                )
+                        ready, message = fish_provider.probe()
+                        if not ready:
+                            self.ui.write_log(
+                                f"ERR: Fish Audio voice is not ready: {message}"
+                            )
+                            fish_provider = None
+                    except Exception as exc:
+                        self.ui.write_log(
+                            f"ERR: Could not initialize Fish Audio: {exc}"
+                        )
+                        fish_provider = None
+                    fish_queue = asyncio.Queue()
+                    self._fish_tts_queue = fish_queue
+                    fish_worker = asyncio.create_task(
+                        self._fish_audio_worker(fish_queue, fish_provider)
+                    )
+
             while True:
                 async for response in self.session.receive():
+                    if fish_live_voice and self._fish_reset_transcription:
+                        fish_seen_text = ""
+                        fish_text_buffer = ""
+                        self._fish_reset_transcription = False
+
                     # Anything at all from the server proves the return path is
                     # alive, so the stall clock stops here rather than in any of
                     # the branches below — a tool call, a transcript or a bare
@@ -1800,7 +1961,7 @@ class JarvisLive:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
 
-                    if response.data:
+                    if response.data and not fish_live_voice:
                         if self._interrupted:
                             pass  # discard: interrupted
                         else:
@@ -1818,6 +1979,11 @@ class JarvisLive:
 
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
+                            fish_delta = ""
+                            if fish_live_voice:
+                                fish_delta, fish_seen_text = _transcription_delta(
+                                    txt, fish_seen_text
+                                )
                             # A turn that involves a tool call passes through
                             # several turn_completes, and the API re-sends the
                             # tail of the transcript across them. Comparing only
@@ -1827,20 +1993,33 @@ class JarvisLive:
                             # twice AND made the avatar mouth it twice.
                             if txt and not _is_repeat_chunk(txt, out_buf):
                                 out_buf.append(txt)
-                                # Hand the words to the mouth as they arrive, so
-                                # the avatar can form the consonants the audio
-                                # alone cannot show. Pure string work — it adds
-                                # nothing measurable to the response path.
-                                self._visemes.feed_text(txt)
+                                if not fish_live_voice:
+                                    # Hand the words to the mouth as they arrive,
+                                    # so the avatar can form consonants the audio
+                                    # alone cannot show.
+                                    self._visemes.feed_text(txt)
+                            if fish_live_voice and fish_delta and not self._interrupted:
+                                if self._turn_done_event:
+                                    self._turn_done_event.clear()
+                                fish_text_buffer = _append_transcription(
+                                    fish_text_buffer, fish_delta
+                                )
+                                sentences, fish_text_buffer = (
+                                    _take_complete_sentences(fish_text_buffer)
+                                )
+                                for sentence in sentences:
+                                    fish_queue.put_nowait(("speech", sentence))
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                if not in_buf and fish_live_voice:
+                                    fish_seen_text = ""
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
-                            if self._turn_done_event:
+                            if self._turn_done_event and not fish_live_voice:
                                 self._turn_done_event.set()
 
                             # If this turn_complete ends an interrupted response, clear the
@@ -1849,6 +2028,12 @@ class JarvisLive:
                                 self._interrupted = False
                                 in_buf  = []
                                 out_buf = []
+                                fish_text_buffer = ""
+                                fish_seen_text = ""
+                                if fish_queue is not None:
+                                    self._cancel_fish_audio()
+                                if self._turn_done_event:
+                                    self._turn_done_event.set()
                                 self._visemes.reset()
                                 continue
 
@@ -1889,6 +2074,13 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
+                            if fish_live_voice:
+                                remaining = fish_text_buffer.strip()
+                                fish_text_buffer = ""
+                                if fish_queue is not None:
+                                    fish_queue.put_nowait(("turn_end", remaining))
+                                elif self._turn_done_event:
+                                    self._turn_done_event.set()
 
                             if self._vision_close_pending:
                                 # This turn_complete IS the vision answer — close camera + release busy flag
@@ -1913,6 +2105,16 @@ class JarvisLive:
             print(f"[JARVIS] ❌ Recv: {e}")
             traceback.print_exc()
             raise
+        finally:
+            if fish_worker is not None:
+                self._fish_tts_stopping = True
+                fish_worker.cancel()
+                if self._fish_tts_current_task is not None:
+                    self._fish_tts_current_task.cancel()
+                await asyncio.gather(fish_worker, return_exceptions=True)
+            if self._fish_tts_queue is fish_queue:
+                self._fish_tts_queue = None
+            self._fish_tts_current_task = None
 
     async def _play_audio(self):
         print("[JARVIS] 🔊 Play started")

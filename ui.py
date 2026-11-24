@@ -1694,7 +1694,7 @@ class CustomizeOverlay(QWidget):
     """Floating overlay — change assistant name, user name, UI colour and voice."""
 
     saved = pyqtSignal(str, str, str, str)   # assistant_name, user_name, ui_color, voice
-    _OW, _OH = 400, 588
+    _OW, _OH = 400, 624
 
     def __init__(self, assistant_name="JARVIS", user_name="",
                  ui_color=DEFAULT_UI_COLOR, voice="", parent=None):
@@ -1748,25 +1748,49 @@ class CustomizeOverlay(QWidget):
         # ── Assistant voice — Gemini prebuilt voices ─────────────────────────
         # Names are language-neutral proper nouns, so the row reads the same in
         # every locale. Selecting one and applying rebuilds the Live session.
-        from memory.config_manager import AVAILABLE_VOICES, DEFAULT_VOICE
+        from memory.config_manager import (
+            AVAILABLE_VOICES,
+            DEFAULT_VOICE,
+            FISH_AUDIO_VOICE,
+        )
         lay.addSpacing(4)
         lay.addWidget(_lbl(t("ASSISTANT VOICE"), 8, color=C.TEXT_DIM,
                             align=Qt.AlignmentFlag.AlignLeft))
         self._sel_voice   = (voice or DEFAULT_VOICE)
-        if self._sel_voice not in AVAILABLE_VOICES:
+        if (self._sel_voice not in AVAILABLE_VOICES
+                and self._sel_voice != FISH_AUDIO_VOICE):
             self._sel_voice = DEFAULT_VOICE
         self._voice_btns: dict[str, QPushButton] = {}
-        voice_row = QHBoxLayout(); voice_row.setSpacing(4)
-        for _v in AVAILABLE_VOICES:
-            b = QPushButton(_v)
-            b.setCheckable(True)
-            b.setFixedHeight(28)
-            b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _=False, name=_v: self._on_voice_pick(name))
-            self._voice_btns[_v] = b
-            voice_row.addWidget(b)
-        lay.addLayout(voice_row)
+        for start in range(0, len(AVAILABLE_VOICES), 3):
+            voice_row = QHBoxLayout()
+            voice_row.setSpacing(4)
+            for _v in AVAILABLE_VOICES[start:start + 3]:
+                b = QPushButton(_v)
+                b.setCheckable(True)
+                b.setFixedHeight(28)
+                b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
+                b.clicked.connect(
+                    lambda _=False, name=_v: self._on_voice_pick(name)
+                )
+                self._voice_btns[_v] = b
+                voice_row.addWidget(b)
+            voice_row.addStretch()
+            lay.addLayout(voice_row)
+        fish_voice = QPushButton("Leon (Fish Audio)")
+        fish_voice.setCheckable(True)
+        fish_voice.setFixedHeight(28)
+        fish_voice.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        fish_voice.setCursor(Qt.CursorShape.PointingHandCursor)
+        fish_voice.clicked.connect(
+            lambda _=False: self._on_voice_pick(FISH_AUDIO_VOICE)
+        )
+        self._voice_btns[FISH_AUDIO_VOICE] = fish_voice
+        fish_row = QHBoxLayout()
+        fish_row.setSpacing(4)
+        fish_row.addWidget(fish_voice)
+        fish_row.addStretch()
+        lay.addLayout(fish_row)
         self._refresh_voice_btns()
 
         # ── UI colour — colour wheel ─────────────────────────────────────────
@@ -7176,6 +7200,8 @@ class MainWindow(QMainWindow):
     # ── Customization ────────────────────────────────────────────────────────────
 
     def _open_customize(self):
+        from memory.config_manager import get_voice_selection
+
         cfg = _read_full_config()
         if self._customize_overlay:
             self._customize_overlay.hide()
@@ -7184,7 +7210,7 @@ class MainWindow(QMainWindow):
             cfg.get("assistant_name", "JARVIS") or "JARVIS",
             cfg.get("user_name", ""),
             cfg.get("ui_color", "") or DEFAULT_UI_COLOR,
-            cfg.get("voice_name", ""),
+            get_voice_selection(),
             parent=cw,
         )
         ow, oh = CustomizeOverlay._OW, CustomizeOverlay._OH
@@ -7231,9 +7257,13 @@ class MainWindow(QMainWindow):
         # session so the new voice takes effect (it's fixed at connect time).
         voice_changed = False
         if voice:
-            from memory.config_manager import get_voice, save_voice
-            if voice != get_voice():
-                save_voice(voice)
+            from memory.config_manager import (
+                FISH_AUDIO_VOICE,
+                get_voice_selection,
+                save_voice_selection,
+            )
+            if voice != get_voice_selection():
+                save_voice_selection(voice)
                 voice_changed = True
 
         try:
@@ -7247,7 +7277,10 @@ class MainWindow(QMainWindow):
             if color_changed:
                 self._log.append_log(f"SYS: UI colour applied — {ui_color}")
             if voice_changed:
-                self._log.append_log(f"SYS: Voice set — {voice}")
+                voice_label = (
+                    "Leon (Fish Audio)" if voice == FISH_AUDIO_VOICE else voice
+                )
+                self._log.append_log(f"SYS: Voice set — {voice_label}")
         except Exception as e:
             self._log.append_log(f"ERR: Config save failed — {e}")
 

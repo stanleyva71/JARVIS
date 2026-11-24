@@ -80,6 +80,7 @@ def save_assistant_config(assistant_name: str, user_name: str) -> None:
 # language, so this list is safe to show verbatim in any locale.
 AVAILABLE_VOICES = ["Charon", "Puck", "Kore", "Fenrir", "Aoede", "Leda"]
 DEFAULT_VOICE    = "Charon"
+FISH_AUDIO_VOICE = "fish_audio_leon"
 
 
 def get_voice() -> str:
@@ -89,9 +90,33 @@ def get_voice() -> str:
     return v if v in AVAILABLE_VOICES else DEFAULT_VOICE
 
 
+def get_voice_selection() -> str:
+    """Return the selected voice option without mixing provider voice names."""
+    data = load_api_keys()
+    if data.get("voice_provider") == "fish_audio":
+        return FISH_AUDIO_VOICE
+    voice = data.get("voice_name", DEFAULT_VOICE) or DEFAULT_VOICE
+    return voice if voice in AVAILABLE_VOICES else DEFAULT_VOICE
+
+
 def save_voice(voice_name: str) -> None:
-    """Persist the chosen Live voice. Unknown names collapse to the default so a
-    bad value can never reach the API and break the session."""
+    """Persist a Gemini prebuilt voice; unknown names collapse to the default."""
+    _write_voice_selection(
+        voice_name if voice_name in AVAILABLE_VOICES else DEFAULT_VOICE,
+        "gemini",
+    )
+
+
+def save_voice_selection(selection: str) -> None:
+    """Persist a voice provider separately from Gemini's prebuilt voice name."""
+    selected = (selection or "").strip()
+    if selected == FISH_AUDIO_VOICE:
+        _write_voice_selection(None, "fish_audio")
+    else:
+        save_voice(selected)
+
+
+def _write_voice_selection(voice_name: str | None, provider: str) -> None:
     ensure_config_dir()
     data: dict = {}
     if CONFIG_FILE.exists():
@@ -99,8 +124,9 @@ def save_voice(voice_name: str) -> None:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    v = (voice_name or "").strip()
-    data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
+    if voice_name is not None:
+        data["voice_name"] = voice_name
+    data["voice_provider"] = provider
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 

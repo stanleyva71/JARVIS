@@ -31,12 +31,22 @@ class FishAudioTTS:
     def __init__(self, cfg: dict):
         self.key = str(cfg.get("api_key") or "").strip()
         self.reference_id = str(cfg.get("reference_id") or "").strip()
-        self.model = str(cfg.get("model") or "").strip() or DEFAULT_MODEL
+        configured_model = str(cfg.get("model") or "").strip()
+        self.config_warning = ""
+        if configured_model and configured_model not in MODELS:
+            self.config_warning = (
+                "The saved Fish Audio model is invalid; using "
+                f"{DEFAULT_MODEL} instead."
+            )
+        self.model = (
+            configured_model if configured_model in MODELS else DEFAULT_MODEL
+        )
         self.latency = str(cfg.get("latency") or "").strip() or DEFAULT_LATENCY
-        if self.model not in MODELS:
-            raise RuntimeError("Unsupported Fish Audio model selected.")
         if self.latency not in LATENCIES:
-            raise RuntimeError("Unsupported Fish Audio latency selected.")
+            self.config_warning = (
+                self.config_warning + " " if self.config_warning else ""
+            ) + f"The saved latency is invalid; using {DEFAULT_LATENCY} instead."
+            self.latency = DEFAULT_LATENCY
         self.caps = dict(DEFAULT_CAPS)
         self.caps["audio_out"] = True
 
@@ -88,7 +98,12 @@ class FishAudioTTS:
                 f"{message}"
             )
 
-        pcm = await asyncio.to_thread(_wav_to_pcm, response.content)
+        pcm = await asyncio.to_thread(
+            _wav_to_pcm,
+            response.content,
+            response.headers.get("content-type", ""),
+            self.key,
+        )
         for piece in audio.chunk(pcm):
             yield piece
 
@@ -101,6 +116,8 @@ class FishAudioTTS:
             return False, "No API key set."
         if not self.reference_id:
             return False, "No reference ID set."
+        if self.config_warning:
+            return True, self.config_warning
         return True, (
             f"Configuration ready for {self.model} ({self.latency} latency). "
             "API access is checked during synthesis."
@@ -121,9 +138,28 @@ def _error_message(body: str, api_key: str) -> str:
         return " ".join((safe_body or "").split())[:160] or "Unknown error"
 
 
-def _wav_to_pcm(data: bytes) -> bytes:
+def _wav_to_pcm(
+    data: bytes, content_type: str = "", api_key: str = ""
+) -> bytes:
     if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        raise RuntimeError("Fish Audio returned an invalid WAV response.")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        body = data[:512].decode("utf-8", errors="replace").strip()
+        if media_type == "application/json" or body.startswith("{"):
+            detail = _error_message(body, api_key)
+            raise RuntimeError(
+                f"Fish Audio returned an error instead of WAV audio: {detail}"
+            )
+        if media_type.startswith("text/") and body:
+            detail = body.replace(api_key, "[redacted]") if api_key else body
+            detail = " ".join(detail.split())[:160]
+            raise RuntimeError(
+                f"Fish Audio returned text instead of WAV audio: {detail}"
+            )
+        raise RuntimeError(
+            "Fish Audio returned invalid WAV data "
+            f"(Content-Type: {media_type or 'unknown'}, {len(data)} bytes)."
+        )
+    parse_error = ""
     try:
         with wave.open(io.BytesIO(data), "rb") as wav:
             frames = wav.getnframes()
@@ -134,11 +170,20 @@ def _wav_to_pcm(data: bytes) -> bytes:
                 raise ValueError("empty WAV")
             if len(wav.readframes(frames)) != frames * channels * width:
                 raise ValueError("truncated WAV")
+    except (EOFError, OSError, ValueError, wave.Error, struct.error) as exc:
+        # Fish Audio may return WAVE variants that `wave` cannot fully parse.
+        # The shared converter can salvage standard PCM data/fmt chunks.
+        parse_error = str(exc)
         pcm = audio.wav_to_pcm(data, want_rate=audio.SPEAKER_RATE)
-    except (EOFError, OSError, ValueError, wave.Error, struct.error):
-        raise RuntimeError("Fish Audio returned an invalid WAV response.") from None
+    else:
+        pcm = audio.wav_to_pcm(data, want_rate=audio.SPEAKER_RATE)
     if not pcm:
-        raise RuntimeError("Fish Audio returned empty audio.")
+        media_type = content_type.split(";", 1)[0].strip().lower() or "unknown"
+        raise RuntimeError(
+            "Fish Audio returned malformed WAV data "
+            f"(Content-Type: {media_type}, {len(data)} bytes"
+            f"{', parser: ' + parse_error if parse_error else ''})."
+        ) from None
     return pcm
 
 
