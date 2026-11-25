@@ -30,7 +30,7 @@ import random
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPolygonF, QRadialGradient
 
 from core.avatar_mesh import JAW_MAX, JAW_PIVOT, get_head_mesh
 
@@ -128,6 +128,8 @@ class HoloAvatar:
         mesh = get_head_mesh()
         self._v0 = mesh["verts"]
         self._n0 = mesh["normals"]
+        self._n_face = mesh["n_face"]
+        self._n_head = mesh["n_head"]
         self._jaw = mesh["jaw"]
         self._brow_w = mesh["brow"]
         self._lips_w = mesh["lips"]
@@ -139,6 +141,23 @@ class HoloAvatar:
         self._e0 = mesh["edges"][:, 0]
         self._e1 = mesh["edges"][:, 1]
         self._lm = mesh["landmarks"]
+
+        # Leon's 3D hair & compact collar geometry
+        self._hv0 = mesh["hair_verts"]
+        self._hn0 = mesh["hair_normals"]
+        self._hf = mesh["hair_faces"]
+        self._hfa, self._hfb, self._hfc = (self._hf[:, i] for i in range(3))
+        self._ht = mesh["hair_t"]
+        self._hlayer = mesh["hair_layer"]
+        self._hf_t = (self._ht[self._hfa] + self._ht[self._hfb] + self._ht[self._hfc]) * (1.0 / 3.0)
+        self._hstrands = mesh["hair_strands"]
+
+        self._cv0 = mesh["collar_verts"]
+        self._cn0 = mesh["collar_normals"]
+        self._cf = mesh["collar_faces"]
+        self._cfa, self._cfb, self._cfc = (self._cf[:, i] for i in range(3))
+        self._cfade = mesh["collar_fade"]
+        self._crim = mesh["collar_rim"]
         # The inner-lip ring runs lower-lip left→right, then upper-lip back.
         # Splitting it lets the upper arc anchor a strip of teeth, which is what
         # keeps an open mouth from reading as a hole punched in the face.
@@ -433,15 +452,9 @@ class HoloAvatar:
         np.copyto(v, self._v0)
 
         if self._brow > 0.004 or self._brow < -0.004:
-            # The brow-to-eye gap is 0.198 head-half-heights and a real raise
-            # moves a third of it. The old 0.045 — halved again by the landmark
-            # weights, which average 0.5 — worked out to six pixels on a 250 px
-            # head, which is to say invisible.
             v[:, 1] += self._brow_w * (self._brow * _BROW_LIFT)
 
         if abs(self._wide) > 0.01 and self._mouth > 0.0:
-            # Spread pulls the corners out and flattens the lips back; rounding
-            # draws them in and pushes them forward into a purse.
             k = self._lips_w * (self._wide * self._mouth)
             v[:, 0] += k * (v[:, 0] - self._lip_c[0]) * 0.55
             v[:, 1] += k * (v[:, 1] - self._lip_c[1]) * 0.30
@@ -464,7 +477,12 @@ class HoloAvatar:
             [-cp * sy, sp, cp * cy],
         ], dtype=np.float32)
 
-        return v @ m.T, self._n0 @ m.T
+        mt = m.T
+        return (
+            v @ mt, self._n0 @ mt,
+            self._hv0 @ mt, self._hn0 @ mt,
+            self._cv0 @ mt, self._cn0 @ mt,
+        )
 
     # ── rendering ───────────────────────────────────────────────────────────
 
@@ -477,6 +495,12 @@ class HoloAvatar:
             self._lut_key = key
         return self._lut_cache
 
+    def _project(self, pts, cx: float, cy: float, r: float):
+        w = _CAM_D - pts[:, 2]
+        np.maximum(w, 0.35, out=w)
+        k = (_CAM_D / w) * r
+        return cx + pts[:, 0] * k, cy - pts[:, 1] * k
+
     def paint(self, p: QPainter, cx: float, cy: float, r: float,
               primary: QColor, accent: QColor, bg: QColor | None = None) -> None:
         """Draw the avatar with its head centre at (cx, cy).
@@ -487,7 +511,7 @@ class HoloAvatar:
         if bg is None:
             bg = QColor(0, 0, 0)
         amp = self._glow
-        verts, norms = self._pose()
+        verts, norms, hv, hn, cv, cn = self._pose()
 
         # ── aura ────────────────────────────────────────────────────────────
         ar = r * 1.95
@@ -500,32 +524,47 @@ class HoloAvatar:
         p.drawEllipse(QRectF(cx - ar, cy - ar, ar * 2, ar * 2))
 
         # ── project ─────────────────────────────────────────────────────────
-        w = _CAM_D - verts[:, 2]
-        np.maximum(w, 0.35, out=w)
-        k = (_CAM_D / w) * r
-        xs = cx + verts[:, 0] * k
-        ys = cy - verts[:, 1] * k
+        xs, ys = self._project(verts, cx, cy, r)
+        hxs, hys = self._project(hv, cx, cy, r)
+        cxs, cys = self._project(cv, cx, cy, r)
+
+        # Classify hair triangles & vertices as behind vs in front of the face
+        # so back/nape hair occludes behind the cheeks while front bangs drape
+        # cleanly in front of the forehead, eyebrows, and left eye.
+        face_xy = verts[:self._n_face, :2]
+        face_z = verts[:self._n_face, 2]
+
+        hc = (hv[self._hfa] + hv[self._hfb] + hv[self._hfc]) * (1.0 / 3.0)
+        d2 = ((hc[:, 0:1] - face_xy[None, :, 0]) ** 2
+              + (hc[:, 1:2] - face_xy[None, :, 1]) ** 2)
+        near = d2 < (0.068 ** 2)
+        occluded_tri = np.any(near & (face_z[None, :] > hc[:, 2:3] + 0.015), axis=1)
+
+        vd2 = ((hv[:, 0:1] - face_xy[None, :, 0]) ** 2
+               + (hv[:, 1:2] - face_xy[None, :, 1]) ** 2)
+        vnear = vd2 < (0.068 ** 2)
+        occluded_v = np.any(vnear & (face_z[None, :] > hv[:, 2:3] + 0.015), axis=1)
 
         if self.shaded:
+            self._paint_collar(p, cxs, cys, cn, cv, primary, bg, amp, front=False)
+            self._paint_hair(p, hxs, hys, hn, hv, primary, bg, amp, occluded_tri, want_back=True)
             self._paint_surface(p, xs, ys, norms, verts, primary, bg, amp)
         self._paint_wire(p, xs, ys, norms, verts, primary, bg, amp)
+        if self.shaded:
+            self._paint_collar(p, cxs, cys, cn, cv, primary, bg, amp, front=True)
         self._paint_features(p, xs, ys, norms, r, primary, accent, bg, amp)
+        if self.shaded:
+            self._paint_hair(p, hxs, hys, hn, hv, primary, bg, amp, occluded_tri, want_back=False)
+        self._paint_hair_strands(p, hxs, hys, hv, primary, bg, amp, occluded_v)
 
     def _paint_surface(self, p: QPainter, xs, ys, norms, verts,
                        primary: QColor, bg: QColor, amp: float) -> None:
         """Fill the camera-facing triangles so the head reads as a lit volume."""
         a, b, c = self._fa, self._fb, self._fc
 
-        # Flat normals, taken from each triangle's own posed geometry — NOT the
-        # averaged vertex normals. Averaging smears the nose, lips and brow
-        # relief into their neighbours and renders the face as a blank egg;
-        # per-facet normals are exactly what makes the anatomy visible.
         fn = np.cross(verts[b] - verts[a], verts[c] - verts[a])
         fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
 
-        # Point them outwards by agreeing with the vertex normals, which were
-        # oriented at build time. Flipping on the sign of n_z instead would
-        # negate x and y as well and scramble the lighting into moiré.
         ref = norms[a] + norms[b] + norms[c]
         fn *= np.sign((fn * ref).sum(1))[:, None]
 
@@ -542,31 +581,20 @@ class HoloAvatar:
         bx, by = xs[b][vis], ys[b][vis]
         cxx, cyy = xs[c][vis], ys[c][vis]
 
-        # A rim term for the glass edge plus a key light high on the left. The
-        # light leans off-axis on purpose: weight it towards the camera and
-        # every front-facing facet returns the same value, which is a flat mask.
         fres = np.clip(1.0 - nz, 0.0, 2.0) ** 1.7
-        lam = np.clip(fn[:, 0] * -0.55 + fn[:, 1] * 0.50 + nz * 0.52, 0.0, 1.0)
-        bright = 0.26 + 0.20 * fres + 0.66 * lam ** 1.05
+        lam = np.clip(fn[:, 0] * -0.52 + fn[:, 1] * 0.48 + nz * 0.56, 0.0, 1.0)
+        bright = 0.25 + 0.19 * fres + 0.67 * lam ** 1.08
         bright *= (self._fade[a][vis] + self._fade[b][vis] + self._fade[c][vis]) / 3.0
         bright *= 0.88 + 0.24 * amp
 
         idx = np.clip((bright * _LUT_N).astype(np.int32), 0, _LUT_N - 1)
 
-        # Far facets first: the neck passes behind the jaw and the head is not
-        # convex around the chin.
-        # Sort far-to-near, but group first: neck facets all draw before head
-        # facets, because the two meshes interpenetrate and a pure depth sort
-        # interleaves them into a torn seam.
         fz = (verts[a, 2][vis] + verts[b, 2][vis] + verts[c, 2][vis]) * (1.0 / 3.0)
         order = np.argsort(self._fgroup[vis] * 1000.0 + fz, kind="stable")
         tris = np.stack([ax, ay, bx, by, cxx, cyy], axis=1)[order].tolist()
         shade = idx[order].tolist()
         lut = self._lut(bg, primary)
 
-        # Aliased fills: adjacent antialiased polygons leave hairline seams, and
-        # the interior of a tiled surface has no silhouette worth smoothing —
-        # the antialiased wireframe drawn afterwards covers the outline.
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         p.setPen(Qt.PenStyle.NoPen)
         for q, sh in zip(tris, shade):
@@ -575,30 +603,179 @@ class HoloAvatar:
                                      QPointF(q[4], q[5])]))
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
+    def _paint_hair(self, p: QPainter, hxs, hys, hn, hv,
+                    primary: QColor, bg: QColor, amp: float,
+                    occluded_tri: np.ndarray, want_back: bool) -> None:
+        """Render Leon's 3D hair locks with smooth silky vertex-normal shading."""
+        a, b, c = self._hfa, self._hfb, self._hfc
+        mask = occluded_tri if want_back else ~occluded_tri
+
+        # Smooth vertex normals eliminate diagonal quad-split facet checkerboard
+        # along curved hair ribbons, giving silky continuous strand shading.
+        fn = hn[a] + hn[b] + hn[c]
+        fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
+
+        nz = fn[:, 2]
+        area = np.abs((hxs[b] - hxs[a]) * (hys[c] - hys[a])
+                      - (hxs[c] - hxs[a]) * (hys[b] - hys[a]))
+        nz_cut = -0.30 if not want_back else -0.25
+        vis = np.flatnonzero(mask & (nz > nz_cut) & (area > 1.0))
+        if vis.size == 0:
+            return
+
+        fn = fn[vis]
+        nz_v = np.abs(nz[vis])
+        ax, ay = hxs[a][vis], hys[a][vis]
+        bx, by = hxs[b][vis], hys[b][vis]
+        cxx, cyy = hxs[c][vis], hys[c][vis]
+
+        # Hair tonal profile: richer/darker at the roots & underlayers so it contrasts
+        # cleanly against the lit face skin, plus a silky sheen along curved strands.
+        ht = self._hf_t[vis]
+        lam = np.clip(fn[:, 0] * -0.45 + fn[:, 1] * 0.55 + nz_v * 0.50, 0.0, 1.0)
+        # Half-vector specular band across the crown & sweeping bangs
+        hy_c = (hv[a, 1][vis] + hv[b, 1][vis] + hv[c, 1][vis]) * (1.0 / 3.0)
+        spec = np.exp(-((hy_c - 0.50) / 0.28) ** 2) * (lam ** 1.8)
+        fres = np.clip(1.0 - nz_v, 0.0, 1.5) ** 1.6
+        root_tone = 0.70 + 0.30 * np.sin(np.pi * np.clip(ht, 0.0, 1.0))
+        bright = (0.14 + 0.34 * lam + 0.26 * spec + 0.14 * fres) * root_tone
+        bright *= 0.88 + 0.24 * amp
+
+        idx = np.clip((bright * _LUT_N).astype(np.int32), 0, _LUT_N - 1)
+        fz = (hv[a, 2][vis] + hv[b, 2][vis] + hv[c, 2][vis]) * (1.0 / 3.0)
+        order = np.argsort(fz + self._hlayer[vis] * 0.12, kind="stable")
+        tris = np.stack([ax, ay, bx, by, cxx, cyy], axis=1)[order].tolist()
+        shade = idx[order].tolist()
+        lut = self._lut(bg, primary)
+
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setPen(Qt.PenStyle.NoPen)
+        for q, sh in zip(tris, shade):
+            p.setBrush(lut[sh])
+            p.drawPolygon(QPolygonF([QPointF(q[0], q[1]), QPointF(q[2], q[3]),
+                                     QPointF(q[4], q[5])]))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    def _paint_hair_strands(self, p: QPainter, hxs, hys, hv,
+                            primary: QColor, bg: QColor, amp: float,
+                            occluded_v: np.ndarray) -> None:
+        """Draw crisp longitudinal strand flow lines along the unoccluded locks."""
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Batch segments into 3 intensity buckets (root/shadow, mid, sheen)
+        buckets: list[list[QLineF]] = [[], [], []]
+        for strand in self._hstrands:
+            for k in range(len(strand) - 1):
+                i0, i1 = int(strand[k]), int(strand[k + 1])
+                if occluded_v[i0] and occluded_v[i1]:
+                    continue
+                if hv[i0, 2] < -0.30 and hv[i1, 2] < -0.30:
+                    continue
+                ym = 0.5 * float(hv[i0, 1] + hv[i1, 1])
+                tm = 0.5 * float(self._ht[i0] + self._ht[i1])
+                sheen = math.exp(-((ym - 0.45) / 0.34) ** 2)
+                b = 2 if (sheen > 0.55 and tm < 0.85) else (1 if tm < 0.85 else 0)
+                buckets[b].append(QLineF(float(hxs[i0]), float(hys[i0]),
+                                         float(hxs[i1]), float(hys[i1])))
+
+        hair_base = _blend(bg, primary, 68)
+        alphas = [38.0, 72.0, 125.0]
+        widths = [0.75, 0.9, 1.05]
+        for b in range(3):
+            if not buckets[b]:
+                continue
+            a = alphas[b] * (0.85 + 0.30 * amp)
+            p.setPen(QPen(_blend(hair_base, primary, min(200.0, a)), widths[b]))
+            p.drawLines(buckets[b])
+
+    def _paint_collar(self, p: QPainter, cxs, cys, cn, cv,
+                      primary: QColor, bg: QColor, amp: float,
+                      front: bool) -> None:
+        """Render the compact upturned jacket collar around the lower neck."""
+        a, b, c = self._cfa, self._cfb, self._cfc
+        fn = np.cross(cv[b] - cv[a], cv[c] - cv[a])
+        fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
+        ref = cn[a] + cn[b] + cn[c]
+        fn *= np.sign((fn * ref).sum(1))[:, None]
+
+        cz = (cv[a, 2] + cv[b, 2] + cv[c, 2]) * (1.0 / 3.0)
+        nz = fn[:, 2]
+        area = np.abs((cxs[b] - cxs[a]) * (cys[c] - cys[a])
+                      - (cxs[c] - cxs[a]) * (cys[b] - cys[a]))
+        depth_mask = (cz >= -0.04) if front else (cz < -0.04)
+        vis = np.flatnonzero(depth_mask & (nz > -0.15) & (area > 1.5))
+        if vis.size == 0:
+            return
+
+        fn = fn[vis]
+        nz_v = np.abs(nz[vis])
+        ax, ay = cxs[a][vis], cys[a][vis]
+        bx, by = cxs[b][vis], cys[b][vis]
+        cxx, cyy = cxs[c][vis], cys[c][vis]
+
+        fres = np.clip(1.0 - nz_v, 0.0, 1.5) ** 1.5
+        lam = np.clip(fn[:, 0] * -0.45 + fn[:, 1] * 0.45 + nz_v * 0.48, 0.0, 1.0)
+        bright = (0.14 + 0.16 * fres + 0.36 * lam) * (
+            (self._cfade[a][vis] + self._cfade[b][vis] + self._cfade[c][vis]) / 3.0
+        )
+        bright *= 0.88 + 0.24 * amp
+        idx = np.clip((bright * _LUT_N).astype(np.int32), 0, _LUT_N - 1)
+
+        order = np.argsort(cz[vis], kind="stable")
+        tris = np.stack([ax, ay, bx, by, cxx, cyy], axis=1)[order].tolist()
+        shade = idx[order].tolist()
+        lut = self._lut(bg, primary)
+
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setPen(Qt.PenStyle.NoPen)
+        for q, sh in zip(tris, shade):
+            p.setBrush(lut[sh])
+            p.drawPolygon(QPolygonF([QPointF(q[0], q[1]), QPointF(q[2], q[3]),
+                                     QPointF(q[4], q[5])]))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        if front:
+            # Subtle lapel rim highlight on front-facing collar edge
+            rim_pts = [QPointF(float(cxs[i]), float(cys[i]))
+                       for i in self._crim if cv[i, 2] >= -0.06]
+            if len(rim_pts) >= 2:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(_blend(bg, primary, 115 + 35 * amp), 1.1))
+                # Draw segments that are adjacent in the rim
+                segs = []
+                for k in range(len(self._crim) - 1):
+                    i0, i1 = int(self._crim[k]), int(self._crim[k + 1])
+                    if cv[i0, 2] >= -0.06 and cv[i1, 2] >= -0.06:
+                        segs.append(QLineF(float(cxs[i0]), float(cys[i0]),
+                                           float(cxs[i1]), float(cys[i1])))
+                if segs:
+                    p.drawLines(segs)
+
     def _paint_wire(self, p: QPainter, xs, ys, norms, verts,
                     primary: QColor, bg: QColor, amp: float) -> None:
         nz = norms[:, 2]
         fres = np.abs(1.0 - np.abs(nz)) ** 1.5
         if self.shaded:
-            # The lit surface underneath is opaque, so back-facing edges would
-            # float on top of the face — cull them and let the wire read as
-            # structure lines over skin.
             front = nz > -0.05
-            va = np.where(front, 0.10 + 0.42 * fres, 0.0)
-            va += 0.30 * np.exp(-((verts[:, 1] - self._scan) / 0.13) ** 2) * front
+            # Keep wireframe lighter over the central face so sculpted anatomy &
+            # Leon's facial features read cleanly without visual clutter.
+            va = np.where(front, 0.06 + 0.36 * fres, 0.0)
+            va += 0.24 * np.exp(-((verts[:, 1] - self._scan) / 0.13) ** 2) * front
         else:
             va = np.where(nz < 0.0, 0.13 + 0.26 * fres, 0.28 + 0.72 * fres)
             va += 0.42 * np.exp(-((verts[:, 1] - self._scan) / 0.13) ** 2)
-        va *= self._fade * (0.80 + 0.45 * amp)
+        # Lighter wireframe around the mouth so closed resting lips look smooth
+        lip_r = self._lip_c
+        mouth_fade = 1.0 - 0.60 * np.exp(
+            -((verts[:, 0] - lip_r[0]) / 0.25) ** 2
+            - ((verts[:, 1] - lip_r[1]) / 0.14) ** 2
+        )
+        va *= self._fade * mouth_fade * (0.80 + 0.45 * amp)
 
         ea = 0.5 * (va[self._e0] + va[self._e1])
         keep = np.flatnonzero(ea > _MIN_ALPHA)
         if keep.size == 0:
             return
 
-        # Sort by opacity bucket once so each bucket is a contiguous *slice* of
-        # one QLineF list; masking and rebuilding per bucket cost more than the
-        # drawing itself.
         bucket = np.clip((ea[keep] * _BUCKETS).astype(np.int32), 0, _BUCKETS - 1)
         order = np.argsort(bucket, kind="stable")
         keep = keep[order]
@@ -617,10 +794,7 @@ class HoloAvatar:
             seg = lines[lo:hi]
             a = 255.0 * min(1.0, (b + 0.5) / _BUCKETS)
             if self.shaded:
-                # These sit on lit skin, so pre-mix against a representative
-                # *skin* tone rather than the background — same fast opaque
-                # path, and the lines still read as highlights over the face.
-                p.setPen(QPen(_blend(skin, primary, a * 0.75), 1.0))
+                p.setPen(QPen(_blend(skin, primary, a * 0.65), 1.0))
             else:
                 p.setPen(QPen(_blend(bg, primary, a), 1.0))
             p.drawLines(seg)
@@ -634,12 +808,7 @@ class HoloAvatar:
     def _paint_features(self, p: QPainter, xs, ys, norms, r: float,
                         primary: QColor, accent: QColor, bg: QColor,
                         amp: float) -> None:
-        """Eyes, brows and the mouth cavity, drawn from the real landmark rings.
-
-        The canonical model's eyes and lips are closed skin — the geometry gives
-        the *shape* of the lids and mouth but no opening, so the openings are
-        painted here, exactly on the landmarks that bound them.
-        """
+        """Eyes, sculpted brows and the mouth cavity, drawn from landmark rings."""
         face = max(0.0, math.cos(self._yaw) * math.cos(self._pitch)) ** 2
         if face < 0.02:
             return
@@ -656,31 +825,79 @@ class HoloAvatar:
                 ey = mid_y + (ey - mid_y) * max(0.04, vis)
             poly = QPolygonF([QPointF(float(a), float(b)) for a, b in zip(ex, ey)])
 
+            p.save()
+            clip_path = QPainterPath()
+            clip_path.addPolygon(poly)
+            p.setClipPath(clip_path)
+
+            # Subtle eyeball shading (soft sclera tint, darker near corners)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(_blend(bg, primary, 22)))       # socket shadow
-            p.drawPolygon(poly)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(_c(primary, 210 * face), 1.3))      # lid line
+            p.setBrush(QBrush(_blend(bg, primary, 30)))
             p.drawPolygon(poly)
 
-            if vis > 0.35:
-                br = poly.boundingRect()
-                gx = br.center().x() + self._gaze[0] * br.width() * 0.16
-                gy = br.center().y() + self._gaze[1] * br.height() * 0.20
+            br = poly.boundingRect()
+            sclera_grad = QRadialGradient(br.center(), br.width() * 0.55)
+            sclera_grad.setColorAt(0.0, _blend(bg, primary, 68))
+            sclera_grad.setColorAt(1.0, _blend(bg, primary, 24))
+            p.setBrush(QBrush(sclera_grad))
+            p.drawPolygon(poly)
+
+            if vis > 0.28:
+                gx = br.center().x() + self._gaze[0] * br.width() * 0.14
+                gy = br.center().y() + self._gaze[1] * br.height() * 0.18 - br.height() * 0.05
                 cpt = QPointF(gx, gy)
-                rad = min(br.height() * 0.62, br.width() * 0.20)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(_c(accent, (70 + 60 * amp) * face * vis)))
-                p.drawEllipse(cpt, rad, rad * vis)            # iris
-                p.setBrush(QBrush(_c(accent, 245 * face * vis)))
-                p.drawEllipse(cpt, rad * 0.42, rad * 0.42 * vis)   # pupil
+                rad = min(br.height() * 0.85, br.width() * 0.24)
+                # Outer limbal ring + iris
+                p.setBrush(QBrush(_c(accent, (110 + 55 * amp) * face * vis)))
+                p.drawEllipse(cpt, rad, rad * min(1.0, vis + 0.15))
+                p.setBrush(QBrush(_c(accent, (165 + 50 * amp) * face * vis)))
+                p.drawEllipse(cpt, rad * 0.78, rad * 0.78 * min(1.0, vis + 0.15))
+                # Dark pupil
+                p.setBrush(QBrush(_blend(bg, accent, 20)))
+                p.drawEllipse(cpt, rad * 0.40, rad * 0.40 * min(1.0, vis + 0.15))
+                # Crisp specular catchlight
+                hl_r = max(1.1, rad * 0.17)
+                p.setBrush(QBrush(_c(primary, 240 * face * vis)))
+                p.drawEllipse(QPointF(gx - rad * 0.28, gy - rad * 0.28), hl_r, hl_r)
 
-        # ── brows ───────────────────────────────────────────────────────────
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(_c(primary, 150 * face), 1.7))
+            # Upper eyelid shadow band for Leon's intense hooded gaze
+            lid_h = br.height() * 0.30
+            p.setBrush(QBrush(_c(bg, 115 * face)))
+            p.drawRect(QRectF(br.left() - 2, br.top() - 1, br.width() + 4, lid_h))
+            p.restore()
+
+            # Crisp upper lash line (stronger) & subtle lower lid edge
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            upper_pts = [QPointF(float(ex[k]), float(ey[k]))
+                         for k in [0, 15, 14, 13, 12, 11, 10, 9, 8]]
+            lower_pts = [QPointF(float(ex[k]), float(ey[k]))
+                         for k in range(0, 9)]
+            p.setPen(QPen(_c(primary, 215 * face), 1.9))
+            p.drawPolyline(QPolygonF(upper_pts))
+            p.setPen(QPen(_c(primary, 115 * face), 0.95))
+            p.drawPolyline(QPolygonF(lower_pts))
+
+        # ── sculpted brows ──────────────────────────────────────────────────
+        # Tapered eyebrow shape from inner glabella to outer tail
+        half_w = [r * 0.015, r * 0.017, r * 0.015, r * 0.010, r * 0.005]
         for key in ("brow_l", "brow_r"):
             idx = lm[key]
-            p.drawPolyline(self._ring(xs, ys, idx))
+            # Order from inner brow (towards nose) to outer tail
+            # In LANDMARKS: brow_l is [70,63,105,66,107] (outer->inner), brow_r is [300,293,334,296,336] (outer->inner)
+            pts_ord = list(reversed(idx))
+            top_pts, bot_pts = [], []
+            for j, vi in enumerate(pts_ord):
+                hw = half_w[min(j, len(half_w) - 1)]
+                px_v, py_v = float(xs[vi]), float(ys[vi])
+                top_pts.append(QPointF(px_v, py_v - hw))
+                bot_pts.append(QPointF(px_v, py_v + hw))
+            brow_poly = QPolygonF(top_pts + list(reversed(bot_pts)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(_c(_blend(bg, primary, 62), 210 * face)))
+            p.drawPolygon(brow_poly)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(_c(primary, 135 * face), 1.0))
+            p.drawPolyline(QPolygonF(top_pts))
 
         # ── mouth ───────────────────────────────────────────────────────────
         inner = self._ring(xs, ys, lm["lips_in"])
@@ -688,14 +905,9 @@ class HoloAvatar:
 
         p.setPen(Qt.PenStyle.NoPen)
         if self._mouth > 0.02:
-            # The cavity is dark but never pure black — a black oval on a glowing
-            # head reads as a hole, not a mouth. Tinting it with the theme keeps
-            # it part of the hologram.
             p.setBrush(QBrush(_blend(bg, primary, 16 + 26 * self._mouth)))
             p.drawPolygon(inner)
 
-            # Upper teeth: a bright strip hanging from the upper lip. It is the
-            # single cheapest thing that makes an open mouth look like speech.
             ux, uy = xs[self._lip_up], ys[self._lip_up]
             th = open_h * 0.30
             pts = [QPointF(float(x), float(y)) for x, y in zip(ux, uy)]
@@ -704,12 +916,27 @@ class HoloAvatar:
             p.setBrush(QBrush(_blend(bg, primary, 150 + 60 * self._mouth)))
             p.drawPolygon(QPolygonF(pts))
 
-            # A warm pool at the back of the throat, strongest when wide open.
             p.setBrush(QBrush(_c(accent, 40 * self._mouth * face)))
             p.drawPolygon(inner)
 
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(_c(primary, (150 + 70 * self._mouth) * face), 1.3))
+            p.drawPolygon(inner)
+        else:
+            # Closed firm lip seam at rest instead of an open oval gap
+            li = lm["lips_in"]
+            mid_pts = [QPointF(float(xs[li[0]]), float(ys[li[0]]))]
+            for k in range(1, 10):
+                uk = 20 - k
+                mx = 0.5 * float(xs[li[k]] + xs[li[uk]])
+                my = 0.5 * float(ys[li[k]] + ys[li[uk]])
+                mid_pts.append(QPointF(mx, my))
+            mid_pts.append(QPointF(float(xs[li[10]]), float(ys[li[10]])))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(_c(_blend(bg, primary, 32), 220 * face), 1.7))
+            p.drawPolyline(QPolygonF(mid_pts))
+
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(_c(primary, (150 + 70 * self._mouth) * face), 1.3))
-        p.drawPolygon(inner)                       # lip edge
-        p.setPen(QPen(_c(primary, 110 * face), 1.1))
+        lip_out_a = (115 if self._mouth > 0.02 else 45) * face
+        p.setPen(QPen(_c(primary, lip_out_a), 0.95))
         p.drawPolygon(self._ring(xs, ys, lm["lips_out"]))

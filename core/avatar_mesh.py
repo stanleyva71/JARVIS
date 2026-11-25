@@ -27,6 +27,7 @@ Coordinate system after normalisation (head-local, right-handed):
 from __future__ import annotations
 
 import collections
+import math
 from pathlib import Path
 
 import numpy as np
@@ -34,11 +35,10 @@ import numpy as np
 _OBJ = Path(__file__).resolve().parent / "face_model.obj"
 
 # Cranium shape, in the model's own units (chin ≈ -9.4, forehead ≈ +8.3).
-# Tuned so that brow→crown is ~0.36 of the head's height, which is the real
-# proportion; a taller cranium than that immediately reads as a long face even
-# though the face itself is untouched measured geometry.
-_SKULL_C = (0.0, 2.0, -1.0)      # centre of the cranial ellipsoid
-_SKULL_R = (8.4, 12.4, 8.2)      # its radii
+# Tuned for Leon Kennedy's slightly broader parietal width and balanced crown
+# height so the hair sits with natural volume rather than an elongated egg dome.
+_SKULL_C = (0.0, 1.8, -1.1)      # centre of the cranial ellipsoid
+_SKULL_R = (8.3, 11.1, 8.2)      # its radii
 _SKULL_POLE = (0.0, 0.42, -1.0)  # direction of the occiput, where the sweep closes
 _SKULL_RINGS = 6
 _SKULL_BLEND = 1.7               # how fast the sweep leaves the face border
@@ -245,6 +245,497 @@ def _unique_edges(faces: np.ndarray) -> np.ndarray:
     return np.unique(e, axis=0)
 
 
+def _sculpt_leon_face(verts: np.ndarray) -> np.ndarray:
+    """Reshape MediaPipe's generic canonical mask toward Leon S. Kennedy's
+    craniofacial structure: sharper mandibular jaw angles, squared chin with
+    mentolabial fold, sculpted cheekbones with lean buccal hollows, lower
+    straighter brow ridge, narrower focused eyes, refined nose bridge, and
+    firm closed resting lips.
+    Operates in raw OBJ units before cranium/neck sweep so borders stay seamless.
+    """
+    v = verts.copy()
+    x, y, z = v[:, 0], v[:, 1], v[:, 2]
+    ax = np.abs(x)
+
+    # 1. Crisp posterior gonial angle tapering into a sleek masculine V-jawline
+    # Accentuate the jaw corner near y ~ -5.2..-6.2, z ~ -1.5..+1.5
+    w_gonial = (
+        np.exp(-((y + 5.6) / 1.15) ** 2)
+        * np.clip((ax - 3.6) / 2.2, 0.0, 1.0)
+        * np.clip((2.2 - z) / 2.5, 0.0, 1.0)
+    )
+    v[:, 0] += np.sign(x) * w_gonial * 0.24
+    v[:, 1] -= w_gonial * 0.14
+    v[:, 2] += w_gonial * 0.22
+
+    # Taper the lower jaw border (y ~ -7.2..-8.8) cleanly inward for Leon's V-line
+    w_jaw_taper = (
+        np.exp(-((y + 7.9) / 1.15) ** 2)
+        * np.clip((ax - 1.8) / 2.2, 0.0, 1.0)
+    )
+    v[:, 0] -= np.sign(x) * w_jaw_taper * 0.22
+    v[:, 2] += w_jaw_taper * 0.12
+
+    # 2. Defined, slightly squared chin + mentolabial crease beneath lower lip
+    w_chin = np.exp(-((y + 9.0) / 1.10) ** 2) * np.exp(-(ax / 1.9) ** 2)
+    w_chin_sq = np.exp(-((y + 9.0) / 0.95) ** 2) * np.exp(-((ax - 0.95) / 0.75) ** 2)
+    v[:, 2] += w_chin * 0.34 + w_chin_sq * 0.14
+    v[:, 0] += np.sign(x) * w_chin_sq * 0.06
+    v[:, 1] -= w_chin * 0.10
+
+    # Subtle mentolabial fold right below the lower lip (y ~ -6.0)
+    w_fold = np.exp(-((y + 6.0) / 0.70) ** 2) * np.exp(-(ax / 1.9) ** 2)
+    v[:, 2] -= w_fold * 0.24
+
+    # 3. Prominent zygomatic cheekbones & lean buccal hollows
+    w_cheekbone = (
+        np.exp(-((y - 0.50) / 1.25) ** 2)
+        * np.exp(-((ax - 5.1) / 1.45) ** 2)
+        * np.clip((z - 0.5) / 2.0, 0.0, 1.0)
+    )
+    v[:, 0] += np.sign(x) * w_cheekbone * 0.26
+    v[:, 2] += w_cheekbone * 0.42
+
+    w_hollow = (
+        np.exp(-((y + 2.65) / 1.35) ** 2)
+        * np.exp(-((ax - 4.3) / 1.30) ** 2)
+        * np.clip(z / 2.5, 0.0, 1.0)
+    )
+    v[:, 0] -= np.sign(x) * w_hollow * 0.26
+    v[:, 2] -= w_hollow * 0.46
+
+    # 4. Lower, straighter, projecting brow ridge (focused/intense expression)
+    w_brow_zone = (
+        np.exp(-((y - 4.75) / 1.10) ** 2)
+        * np.exp(-(ax / 5.4) ** 2)
+        * np.clip((z - 1.5) / 2.5, 0.0, 1.0)
+    )
+    w_inner_brow = (
+        np.exp(-((y - 4.65) / 0.95) ** 2)
+        * np.exp(-(ax / 2.4) ** 2)
+        * np.clip((z - 2.0) / 2.5, 0.0, 1.0)
+    )
+    v[:, 1] -= w_brow_zone * 0.34 + w_inner_brow * 0.22
+    v[:, 2] += w_brow_zone * 0.32 + w_inner_brow * 0.28
+
+    # 5. Narrower, slightly hooded intense eyes
+    for eye_key in ("eye_l", "eye_r"):
+        ring = LANDMARKS[eye_key]
+        # Indices 0..8 are corner-to-corner lower lid; 9..15 are upper lid
+        upper = ring[9:]
+        lower = ring[1:8]
+        v[upper, 1] -= 0.14
+        v[upper, 2] += 0.08
+        v[lower, 1] += 0.05
+
+    # 6. Refined straight nasal bridge
+    w_nose_bridge = (
+        np.exp(-((y - 1.5) / 2.1) ** 2)
+        * np.exp(-(ax / 1.25) ** 2)
+        * np.clip((z - 4.2) / 2.0, 0.0, 1.0)
+    )
+    v[:, 0] -= x * w_nose_bridge * 0.10
+    v[:, 2] += np.exp(-((y - 1.8) / 1.1) ** 2) * np.exp(-(ax / 0.85) ** 2) * 0.22
+
+    # 7. Firm closed resting lips & defined Cupid's bow
+    li = LANDMARKS["lips_in"]
+    # Bring lower inner lip (1..9) up and upper inner lip (11..19) down so they meet
+    mid_y = 0.5 * (v[li[5], 1] + v[li[15], 1])
+    for k in range(1, 10):
+        t = math.sin(math.pi * k / 10.0) ** 0.7
+        v[li[k], 1] = v[li[k], 1] * (1.0 - 0.82 * t) + (mid_y - 0.015) * (0.82 * t)
+    for k in range(11, 20):
+        t = math.sin(math.pi * (k - 10) / 10.0) ** 0.7
+        v[li[k], 1] = v[li[k], 1] * (1.0 - 0.82 * t) + (mid_y + 0.015) * (0.82 * t)
+    # Slightly bring outer lips closer to match the closed inner seam
+    lo = LANDMARKS["lips_out"]
+    for k in range(1, 10):
+        t = math.sin(math.pi * k / 10.0) ** 0.8
+        v[lo[k], 1] += 0.14 * t
+    for k in range(11, 20):
+        t = math.sin(math.pi * (k - 10) / 10.0) ** 0.8
+        v[lo[k], 1] -= 0.12 * t
+    # Slight firm downturn at the mouth corners
+    v[lo[0], 1] -= 0.06
+    v[lo[10], 1] -= 0.06
+    v[li[0], 1] -= 0.06
+    v[li[10], 1] -= 0.06
+
+    return v
+
+
+def _catmull_rom(pts: np.ndarray, n_samples: int) -> np.ndarray:
+    """Evaluate a smooth Catmull-Rom spline through 3D control points."""
+    p = np.asarray(pts, dtype=np.float64)
+    # Duplicate endpoints for tangent continuity
+    ext = np.vstack([2.0 * p[0] - p[1], p, 2.0 * p[-1] - p[-2]])
+    segs = len(p) - 1
+    ts = np.linspace(0.0, segs, n_samples, endpoint=True)
+    out = np.empty((n_samples, 3), dtype=np.float64)
+    for k, u in enumerate(ts):
+        i = min(int(u), segs - 1)
+        t = u - i
+        t2, t3 = t * t, t * t * t
+        p0, p1, p2, p3 = ext[i], ext[i + 1], ext[i + 2], ext[i + 3]
+        out[k] = 0.5 * (
+            (2.0 * p1)
+            + (-p0 + p2) * t
+            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+        )
+    return out
+
+
+def _build_leon_hair(head_verts: np.ndarray):
+    """Build Leon S. Kennedy's layered 3D curtain hair in raw OBJ coordinates.
+
+    Consists of:
+      1. A sculpted hair cap over the crown/sides/back with an off-center right part.
+      2. Swept 3D triangular-prism locks (left/right edge + raised center spine)
+         forming the signature asymmetrical bangs over the viewer's left eye,
+         swept right curtain, temple/cheek framing layers, and nape strands.
+      3. Longitudinal strand polylines following every lock for silky HUD lines.
+    """
+    verts_list: list[np.ndarray] = []
+    faces_list: list[list[int]] = []
+    outward_list: list[np.ndarray] = []
+    t_list: list[np.ndarray] = []       # 0 = root, 1 = feathered tip
+    layer_list: list[int] = []          # per-triangle layer priority for clean sorting
+    strand_list: list[np.ndarray] = []  # index chains for longitudinal strand lines
+
+    skull_c = np.array([0.0, 2.5, -1.2], dtype=np.float64)
+
+    def add_lock(ctrl_pts, w_max: float, thickness: float, n_seg: int = 10,
+                 w_root_frac: float = 0.72, tip_taper: float = 0.85,
+                 twist_bias: np.ndarray | None = None, layer: int = 1):
+        pts = _catmull_rom(ctrl_pts, n_seg + 1)
+        tang = np.gradient(pts, axis=0)
+        tang /= np.maximum(np.linalg.norm(tang, axis=1, keepdims=True), 1e-9)
+
+        # Outward normal points radially away from the skull center, orthogonalized
+        # against the strand tangent (biased slightly forward for front bangs).
+        rad = pts - skull_c
+        if twist_bias is not None:
+            rad = rad + twist_bias[None, :]
+        rad /= np.maximum(np.linalg.norm(rad, axis=1, keepdims=True), 1e-9)
+        nrm = rad - (rad * tang).sum(1, keepdims=True) * tang
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+        side = np.cross(tang, nrm)
+        side /= np.maximum(np.linalg.norm(side, axis=1, keepdims=True), 1e-9)
+
+        u = np.linspace(0.0, 1.0, n_seg + 1)
+        # Smooth bell-to-pointed-tip width profile
+        cos_tail = np.maximum(0.0, np.cos(((u - 0.58) / 0.42) * (np.pi * 0.5)))
+        taper_tail = np.where(u < 0.58, 1.0, cos_tail ** tip_taper)
+        w = w_max * (w_root_frac + (1.0 - w_root_frac) * np.sin(np.pi * np.minimum(u / 0.7, 1.0)) ** 0.6) * taper_tail
+        th = thickness * (0.55 + 0.45 * np.sin(np.pi * np.minimum(u / 0.75, 1.0))) * taper_tail
+
+        base = sum(len(a) for a in verts_list)
+        # 3 vertices per station (left, raised spine, right) except final tip vertex
+        ring_verts = []
+        ring_out = []
+        ring_t = []
+        spine_idx = []
+        left_idx = []
+        right_idx = []
+
+        for k in range(n_seg):
+            p_c = pts[k]
+            s_v = side[k] * (w[k] * 0.5)
+            n_v = nrm[k] * th[k]
+            vL = p_c - s_v
+            vM = p_c + n_v
+            vR = p_c + s_v
+            idx0 = base + len(ring_verts)
+            ring_verts.extend([vL, vM, vR])
+            ring_out.extend([nrm[k] - side[k] * 0.25, nrm[k], nrm[k] + side[k] * 0.25])
+            ring_t.extend([u[k], u[k], u[k]])
+            left_idx.append(idx0)
+            spine_idx.append(idx0 + 1)
+            right_idx.append(idx0 + 2)
+
+        # Sharp feathered tip point
+        tip_idx = base + len(ring_verts)
+        ring_verts.append(pts[-1])
+        ring_out.append(nrm[-1])
+        ring_t.append(1.0)
+        left_idx.append(tip_idx)
+        spine_idx.append(tip_idx)
+        right_idx.append(tip_idx)
+
+        for k in range(n_seg - 1):
+            l0, m0, r0 = left_idx[k], spine_idx[k], right_idx[k]
+            l1, m1, r1 = left_idx[k + 1], spine_idx[k + 1], right_idx[k + 1]
+            faces_list.append([l0, l1, m1])
+            faces_list.append([l0, m1, m0])
+            faces_list.append([m0, m1, r1])
+            faces_list.append([m0, r1, r0])
+            layer_list.extend([layer, layer, layer, layer])
+        # Tip cap triangles
+        l0, m0, r0 = left_idx[-2], spine_idx[-2], right_idx[-2]
+        faces_list.append([l0, tip_idx, m0])
+        faces_list.append([m0, tip_idx, r0])
+        layer_list.extend([layer, layer])
+
+        verts_list.append(np.array(ring_verts, dtype=np.float64))
+        outward_list.append(np.array(ring_out, dtype=np.float64))
+        t_list.append(np.array(ring_t, dtype=np.float64))
+        strand_list.append(np.array(spine_idx, dtype=np.int32))
+        if w_max >= 1.8:
+            strand_list.append(np.array(left_idx, dtype=np.int32))
+
+    # ── 1. Base sculpted hair cap (crown & occiput volume, keeps forehead open)
+    n_u, n_v = 11, 20
+    cap_v = np.empty((n_u, n_v, 3), dtype=np.float64)
+    cap_o = np.empty((n_u, n_v, 3), dtype=np.float64)
+    cap_t = np.empty((n_u, n_v), dtype=np.float64)
+    phis = np.linspace(-0.92 * np.pi, 0.92 * np.pi, n_v)   # -pi back-left -> 0 front -> +pi back-right
+    thetas = np.linspace(0.06, 1.0, n_u)
+    part_phi = 0.24
+
+    for iu, th in enumerate(thetas):
+        for iv, ph in enumerate(phis):
+            # Stay high above the forehead in front (front_w ~ 1), sweep low at sides/back
+            front_w = np.exp(-(ph / 0.85) ** 2)
+            part_dip = np.exp(-((ph - part_phi) / 0.26) ** 2) * front_w
+            ang_max = 0.72 + 1.28 * (1.0 - front_w) - 0.12 * part_dip
+            ang_y = max(0.05, min(2.05, th * ang_max))
+            sx = np.sin(ang_y) * np.sin(ph)
+            sy = np.cos(ang_y)
+            sz = np.sin(ang_y) * np.cos(ph)
+            d = np.array([sx, sy, sz], dtype=np.float64)
+
+            rx, ry, rz = 8.35, 10.0, 8.45
+            side_bulge = 1.0 + 0.03 * (np.sin(ang_y) ** 1.3) * (1.0 - 0.3 * front_w)
+            top_lift = 1.0 + 0.07 * (1.0 - th) - 0.05 * part_dip * (1.0 - th)
+            pos = np.array([0.0, 2.2, -1.2]) + d * np.array([rx * side_bulge, ry * top_lift, rz])
+            if pos[1] < -2.0 and pos[2] < -1.0:
+                pos[0] *= 0.88
+            cap_v[iu, iv] = pos
+            cap_o[iu, iv] = d
+            cap_t[iu, iv] = 0.12 + 0.45 * th
+
+    cap_base = sum(len(a) for a in verts_list)
+    verts_list.append(cap_v.reshape(-1, 3))
+    outward_list.append(cap_o.reshape(-1, 3))
+    t_list.append(cap_t.reshape(-1))
+    for iu in range(n_u - 1):
+        for iv in range(n_v - 1):
+            a = cap_base + iu * n_v + iv
+            b = a + 1
+            c = a + n_v
+            d_i = c + 1
+            faces_list.append([a, c, d_i])
+            faces_list.append([a, d_i, b])
+            layer_list.extend([0, 0])
+
+    # ── 2. Viewer's LEFT Curtain & Iconic Eye-Framing Bangs (x < 0) ─────────
+    front_bias = np.array([0.0, 0.15, 2.8], dtype=np.float64)
+    # L0 (layer 3): sweeps diagonally from part across inner-left brow
+    add_lock([
+        [1.8, 9.8, 5.55],
+        [-0.2, 7.9, 6.55],
+        [-1.9, 5.5, 6.10],
+        [-2.8, 3.6, 5.40],
+        [-3.0, 2.0, 4.95],
+    ], w_max=1.35, thickness=0.40, n_seg=14, twist_bias=front_bias, layer=3)
+
+    # L1 (layer 2): signature feather lock grazing outer-upper left eye
+    add_lock([
+        [1.7, 10.2, 5.15],
+        [-0.7, 8.2, 6.25],
+        [-2.8, 5.4, 5.70],
+        [-3.8, 3.0, 4.95],
+        [-3.9, 1.1, 4.45],
+    ], w_max=1.85, thickness=0.46, n_seg=14, twist_bias=front_bias, layer=2)
+
+    # L2 (layer 1): main heavy curtain framing outer left eye & upper cheek
+    add_lock([
+        [1.5, 10.6, 4.65],
+        [-1.5, 8.7, 5.90],
+        [-4.0, 5.5, 5.25],
+        [-4.8, 2.7, 4.40],
+        [-4.5, 0.5, 3.90],
+    ], w_max=2.35, thickness=0.56, n_seg=14, twist_bias=front_bias, layer=1)
+
+    # L3 (layer 1): temple drape along left cheekbone
+    add_lock([
+        [1.1, 11.1, 4.00],
+        [-2.5, 9.2, 5.25],
+        [-5.2, 5.6, 4.35],
+        [-5.8, 2.3, 3.45],
+        [-5.2, -0.3, 2.85],
+    ], w_max=2.75, thickness=0.60, n_seg=13, twist_bias=np.array([-1.0, 0.1, 1.8]), layer=1)
+
+    # L4 (layer 1): outer parietal hugging temple & cheek smoothly (zero gap)
+    add_lock([
+        [0.4, 11.4, 3.15],
+        [-3.4, 9.4, 4.25],
+        [-6.0, 5.2, 3.30],
+        [-6.4, 1.5, 2.35],
+        [-5.7, -1.3, 1.75],
+    ], w_max=2.95, thickness=0.58, n_seg=13, twist_bias=np.array([-1.2, 0.0, 1.6]), layer=1)
+
+    # L5 (layer 0): temple/ear framing tucked seamlessly behind L4
+    add_lock([
+        [-0.7, 11.4, 1.95],
+        [-4.3, 9.0, 2.85],
+        [-6.5, 4.8, 1.75],
+        [-6.5, 0.6, 0.95],
+        [-5.8, -1.9, 0.45],
+    ], w_max=3.10, thickness=0.52, n_seg=12, layer=0)
+
+    # Fine foreground highlight wisp over L1/L2 ridge
+    add_lock([
+        [1.5, 10.0, 5.50],
+        [-0.9, 7.9, 6.65],
+        [-3.0, 5.1, 6.05],
+        [-4.0, 2.6, 5.20],
+        [-4.1, 0.9, 4.70],
+    ], w_max=0.92, thickness=0.32, n_seg=13, twist_bias=front_bias, layer=4)
+
+    # ── 3. Viewer's RIGHT Curtain (x > 0, sweeping smoothly from part) ──────
+    add_lock([
+        [1.9, 9.8, 5.30],
+        [3.6, 8.1, 5.75],
+        [4.8, 5.5, 5.05],
+        [5.0, 2.9, 4.30],
+        [4.5, 1.1, 3.85],
+    ], w_max=2.05, thickness=0.48, n_seg=13, twist_bias=front_bias, layer=2)
+
+    add_lock([
+        [1.8, 10.4, 4.85],
+        [4.2, 8.7, 5.20],
+        [5.7, 5.5, 4.25],
+        [5.9, 2.3, 3.40],
+        [5.3, 0.0, 2.85],
+    ], w_max=2.70, thickness=0.58, n_seg=13, twist_bias=np.array([1.0, 0.1, 1.8]), layer=1)
+
+    add_lock([
+        [1.5, 11.0, 4.10],
+        [4.5, 9.1, 4.30],
+        [6.2, 5.2, 3.30],
+        [6.4, 1.5, 2.30],
+        [5.7, -1.3, 1.75],
+    ], w_max=2.95, thickness=0.58, n_seg=13, twist_bias=np.array([1.2, 0.0, 1.6]), layer=1)
+
+    add_lock([
+        [0.9, 11.4, 2.95],
+        [4.6, 9.0, 3.00],
+        [6.6, 4.8, 1.75],
+        [6.5, 0.6, 0.95],
+        [5.8, -1.9, 0.45],
+    ], w_max=3.10, thickness=0.52, n_seg=12, layer=0)
+
+    add_lock([
+        [2.0, 10.1, 5.55],
+        [4.1, 8.2, 5.85],
+        [5.3, 5.3, 4.80],
+        [5.4, 2.5, 3.90],
+        [4.8, 0.7, 3.40],
+    ], w_max=0.95, thickness=0.33, n_seg=13, twist_bias=front_bias, layer=3)
+
+    # ── 4. Crown Peak & Side-Back Nape Layers (closed cleanly at the part) ──
+    add_lock([
+        [2.1, 10.4, 4.35],
+        [-0.2, 11.7, 2.10],
+        [-3.5, 10.5, -0.50],
+        [-6.5, 5.8, -1.80],
+        [-6.6, -0.4, -2.00],
+        [-5.8, -4.0, -2.10],
+    ], w_max=3.2, thickness=0.64, n_seg=12, layer=0)
+
+    add_lock([
+        [1.7, 10.5, 4.25],
+        [3.6, 11.4, 1.90],
+        [5.9, 9.3, -0.40],
+        [6.8, 4.8, -1.70],
+        [6.7, -0.6, -2.00],
+        [5.8, -4.0, -2.10],
+    ], w_max=3.2, thickness=0.64, n_seg=12, layer=0)
+
+    # Rear side/nape locks behind the ears
+    for sgn in (-1.0, 1.0):
+        add_lock([
+            [sgn * 2.2, 10.5, -1.0],
+            [sgn * 5.8, 7.8, -3.5],
+            [sgn * 7.2, 2.6, -4.4],
+            [sgn * 6.5, -2.6, -4.0],
+            [sgn * 5.3, -5.8, -3.5],
+        ], w_max=3.1, thickness=0.65, n_seg=10, layer=0)
+
+        add_lock([
+            [sgn * 0.6, 9.6, -4.8],
+            [sgn * 2.4, 5.8, -7.2],
+            [sgn * 3.5, 0.2, -7.5],
+            [sgn * 3.4, -4.5, -6.2],
+            [sgn * 2.8, -7.0, -5.0],
+        ], w_max=3.4, thickness=0.60, n_seg=10, layer=0)
+
+    hv = np.vstack(verts_list)
+    hf = np.array(faces_list, dtype=np.int32)
+    ho = np.vstack(outward_list)
+    ht = np.concatenate(t_list)
+    h_layer = np.array(layer_list, dtype=np.float32)
+    hn = _vertex_normals(hv, hf, ho)
+    return hv, hf, hn, ht, h_layer, strand_list
+
+
+def _build_leon_collar():
+    """Compact upturned aviator/bomber collar hugging the base of the neck,
+    fading out cleanly at the bottom edge like the neck stub."""
+    verts_list: list[np.ndarray] = []
+    faces_list: list[list[int]] = []
+    outward_list: list[np.ndarray] = []
+    fade_list: list[np.ndarray] = []
+
+    # Open horseshoe collar wrapping from front-left around the back to front-right
+    n_u, n_v = 5, 19
+    phis = np.linspace(-0.84 * np.pi, 0.84 * np.pi, n_v)  # 0 = back (-z), +-pi = front (+z)
+    # Build in raw coords: y from -8.0 (top collar rim) down to -12.9 (faded base)
+    us = np.linspace(0.0, 1.0, n_u)
+    cv = np.empty((n_u, n_v, 3), dtype=np.float64)
+    co = np.empty((n_u, n_v, 3), dtype=np.float64)
+    cf = np.empty((n_u, n_v), dtype=np.float64)
+
+    for iu, u in enumerate(us):
+        # Collar opens softly at the front throat, sits lower like Leon's open bomber collar
+        for iv, ph in enumerate(phis):
+            backness = 0.5 * (1.0 + np.cos(ph))  # 1 at back, 0 at front throat
+            y_top = -10.2 + 0.7 * backness - 1.4 * (1.0 - backness) ** 1.8
+            y_bot = -13.1
+            y = y_top * (1.0 - u) + y_bot * u
+            # Open gently outward like shearling lapels
+            rim_flare = 1.0 + 0.24 * (1.0 - u) ** 1.3
+            rx = (6.5 + 2.4 * (u ** 1.3)) * rim_flare
+            rz = (5.4 + 1.8 * (u ** 1.3)) * rim_flare
+            x = rx * np.sin(ph)
+            z = _NECK_Z - rz * np.cos(ph)
+            cv[iu, iv] = [x, y, z]
+            co[iu, iv] = [np.sin(ph), 0.22 * (1.0 - u), -np.cos(ph)]
+            cf[iu, iv] = (0.58 - 0.48 * (u ** 1.3)) * (0.55 + 0.45 * backness)
+
+    verts_list.append(cv.reshape(-1, 3))
+    outward_list.append(co.reshape(-1, 3))
+    fade_list.append(cf.reshape(-1))
+    for iu in range(n_u - 1):
+        for iv in range(n_v - 1):
+            a = iu * n_v + iv
+            b = a + 1
+            c = a + n_v
+            d = c + 1
+            faces_list.append([a, b, d])
+            faces_list.append([a, d, c])
+
+    v = np.vstack(verts_list)
+    f = np.array(faces_list, dtype=np.int32)
+    o = np.vstack(outward_list)
+    n = _vertex_normals(v, f, o)
+    # Top rim polyline for crisp subtle lapel edge
+    rim = np.arange(n_v, dtype=np.int32)
+    return v, f, n, fade_list[0], rim
+
+
 def _check_landmarks(verts: np.ndarray) -> None:
     """Fail loudly at build time if a landmark ring is not where it should be."""
     for left, right in (("eye_l", "eye_r"), ("brow_l", "brow_r")):
@@ -263,19 +754,28 @@ def _check_landmarks(verts: np.ndarray) -> None:
 def build_head() -> dict:
     """Assemble the full head. Called once; `get_head_mesh()` caches the result."""
     verts, faces = _load_obj(_OBJ)
+    verts = _sculpt_leon_face(verts)
     _check_landmarks(verts)
 
     n_face = len(verts)
     verts, faces = _add_cranium(verts, faces)
     n_head = len(verts)
+
+    # Build Leon's 3D hair and compact collar in the same raw OBJ coordinate space
+    hair_v, hair_f, hair_n, hair_t, hair_layer, hair_strands = _build_leon_hair(verts[:n_head])
+    col_v, col_f, col_n, col_fade, col_rim = _build_leon_collar()
+
     verts, faces, fade = _add_neck(verts, faces)
 
-    # ── normalise: crown → +1, chin → -1, eyes land on y ≈ 0 ────────────────
+    # ── normalise: top of hair/crown → +1, chin → -1, eyes land on y ≈ 0 ─────
     head_y = verts[:n_head, 1]
-    crown, chin = head_y.max(), head_y.min()
+    crown = max(float(head_y.max()), float(hair_v[:, 1].max()))
+    chin = float(head_y.min())
     scale = 2.0 / (crown - chin)
     centre = np.array([0.0, (crown + chin) * 0.5, 0.0])
     verts = (verts - centre) * scale
+    hair_v = (hair_v - centre) * scale
+    col_v = (col_v - centre) * scale
 
     # Outward reference, per part: the head is star-shaped about its own centre,
     # while the neck is a tube whose outward direction is radial in x/z only.
@@ -322,6 +822,8 @@ def build_head() -> dict:
     # always behind the head where they overlap, so draw every neck facet first.
     face_group = (faces >= n_head).all(axis=1).astype(np.int32)   # 1 = neck
 
+    span_min = min(float(verts[:, 1].min()), float(col_v[:, 1].min()))
+
     return {
         "face_group": np.ascontiguousarray(1 - face_group, dtype=np.float32),
         "brow": np.ascontiguousarray(brow, dtype=np.float32),
@@ -336,7 +838,18 @@ def build_head() -> dict:
         "landmarks": {k: np.array(v, dtype=np.int32) for k, v in LANDMARKS.items()},
         "n_face": n_face,
         "n_head": n_head,
-        "span": (1.0, float(verts[:, 1].min())),        # crown, bottom of the neck
+        "span": (1.0, span_min),                        # top of hair, bottom of neck/collar
+        "hair_verts": np.ascontiguousarray(hair_v, dtype=np.float32),
+        "hair_normals": np.ascontiguousarray(hair_n, dtype=np.float32),
+        "hair_faces": np.ascontiguousarray(hair_f, dtype=np.int32),
+        "hair_t": np.ascontiguousarray(hair_t, dtype=np.float32),
+        "hair_layer": np.ascontiguousarray(hair_layer, dtype=np.float32),
+        "hair_strands": hair_strands,
+        "collar_verts": np.ascontiguousarray(col_v, dtype=np.float32),
+        "collar_normals": np.ascontiguousarray(col_n, dtype=np.float32),
+        "collar_faces": np.ascontiguousarray(col_f, dtype=np.int32),
+        "collar_fade": np.ascontiguousarray(col_fade, dtype=np.float32),
+        "collar_rim": col_rim,
     }
 
 
